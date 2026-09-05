@@ -133,8 +133,13 @@ export async function createBusiness(input: unknown): Promise<BusinessRecord> {
     // An account with no subscription row at all is treated exactly like a
     // non-ACTIVE subscription: `effectivePlan()` drops it to FREE limits.
     const plan: PlanContext = subscriptionRow ? toPlanContext(subscriptionRow.plan) : freePlan;
+    // The row's own startDate/endDate are passed along so a subscription that
+    // still says ACTIVE after its window closed is demoted to FREE here too —
+    // the same rule the entitlement resolver applies (see
+    // `evaluateSubscription()` in src/lib/entitlements.ts). Omitting the dates
+    // would keep the old status-only behaviour.
     const subscription: SubscriptionContext = subscriptionRow
-      ? toSubscriptionContext(subscriptionRow.status)
+      ? toSubscriptionContext(subscriptionRow.status, subscriptionRow)
       : { status: "EXPIRED" };
 
     // Only this account's live businesses count toward the limit. Archived

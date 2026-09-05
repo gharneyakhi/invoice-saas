@@ -19,8 +19,9 @@ Key isolation rule: **Business is the data-isolation boundary.** Every
 query touching Customer/Product/Invoice/File must verify
 `business.accountId === session.accountId` server-side. `businessId` from
 the client is never trusted as proof of authorization — see
-`src/lib/entitlements.ts` and the (to-be-built) `requireBusinessOwnership()`
-guard in Phase 3.
+`src/server/auth/requireBusinessOwnership.ts` (the guard) and
+`src/lib/entitlements.ts` + `src/server/entitlements/` (what the account's plan
+allows).
 
 Subscription lives on `Account`, not `Business`, so plan limits apply
 across all of a user's businesses combined (business count) and per
@@ -217,7 +218,136 @@ archived Business are untouched, and archiving is idempotent.
   behaviour and the ownership guard each fails the suite, so the assertions are
   load-bearing rather than vacuous.
 
-## 8. Running locally (once you have the above)
+## 8. Phase 3 (continued) — Entitlement & usage-period server layer
+
+Server-side only, like section 7: no UI, no API routes, no invoice CRUD, no
+payments. This is the layer future services call to answer "what may this
+account do right now?".
+
+### Files created
+| File | Purpose |
+|---|---|
+| `src/server/entitlements/entitlementService.ts` | `resolveEntitlements()` → a typed `EntitlementContext`; plus `entitlementCanCreateBusiness()` / `entitlementHasFeature()` wrappers that route through the pure helpers |
+| `src/server/entitlements/subscriptionSelection.ts` | Pure "which subscription is current, and does it grant anything?" rule — `selectCurrentSubscription()`, `evaluateSubscriptionRow()`, `enforcedSubscriptionContext()`, `SUBSCRIPTION_ORDER_BY`, `EntitlementFallbackReason` |
+| `src/server/entitlements/usagePeriodService.ts` | `getCurrentUsagePeriod()` (read-only) and `ensureCurrentUsagePeriod()` (idempotent, race-safe); `currentUsagePeriodWhere()` key builder |
+| `src/server/entitlements/invoiceQuota.ts` | `getInvoiceQuotaStatus()` — read-only "may this account finalize one more invoice this month?" |
+| `src/lib/entitlements.test.ts` | 49 tests: `effectivePlan`, Free fallback, `canCreateBusiness`, `canFinalizeInvoice`, `hasFeature`, all five feature wrappers, `invoiceQuotaWarningLevel` (0% / below 80% / exactly 80% / at limit / zero limit), `evaluateSubscription` |
+| `src/server/entitlements/subscriptionSelection.test.ts` | 25 tests for the pure selection rule |
+| `src/server/entitlements/entitlementService.test.ts` | 23 tests (Prisma + session mocked, real pure logic) |
+| `src/server/entitlements/usagePeriodService.test.ts` | 20 tests incl. race, isolation and never-write assertions |
+| `src/server/entitlements/invoiceQuota.test.ts` | 17 tests incl. the read-only contract |
+
+### Files modified (all additive except one line)
+| File | Change |
+|---|---|
+| `src/lib/entitlements.ts` | **Added** the pure `evaluateSubscription()` + `SubscriptionWindow`/`SubscriptionLapse`/`SubscriptionEffectiveness`. No existing function changed behaviour: `effectivePlan`, `canCreateBusiness`, `canFinalizeInvoice`, `hasFeature`, the wrappers and `invoiceQuotaWarningLevel` are untouched. |
+| `src/server/business/planContext.ts` | **Added** `toStoredSubscriptionStatus()`; `toSubscriptionContext()` gained two *optional* params (`window`, `now`). Called with one argument it behaves exactly as before. |
+| `src/server/business/businessService.ts` | **One line**: `toSubscriptionContext(subscriptionRow.status, subscriptionRow)` so `createBusiness` applies the same date-lapse rule as the resolver. Nothing else in Task 2 changed. |
+| `src/server/errors.ts` | **Added** `EntitlementDataError` (with a `code`), matching the existing `BusinessLimitReachedError` style. |
+
+`src/server/auth/requireBusinessOwnership.ts` (Task 1) was not touched.
+
+### Plan limits stay in one place
+No limit appears anywhere in the new code. `FREE 1/3`, `BASIC 1/10`, `PRO 3/50`
+live only in `prisma/seed.ts`, are read from the `Plan` rows at runtime, and are
+compared only by the pure functions in `src/lib/entitlements.ts`. The resolver
+test uses deliberately un-seeded numbers (limit 7 businesses / 42 invoices) to
+prove nothing is hard-coded.
+
+### Subscription effective state
+`evaluateSubscription(status, window, now)` decides, and it can only ever narrow
+an entitlement:
+
+| Stored row | Enforced as | `fallbackReason` |
+|---|---|---|
+| `ACTIVE`, window covers now, plan active | that plan | `NONE` |
+| `ACTIVE`, `endDate` already passed | **Free** | `ENDED` |
+| `ACTIVE`, `endDate` exactly now | **Free** (boundary is exclusive) | `ENDED` |
+| `ACTIVE`, `startDate` in the future | **Free** | `NOT_STARTED` |
+| `ACTIVE`, `endDate <= startDate` (impossible window) | **Free** | `INCONSISTENT_WINDOW` |
+| `ACTIVE` in window, but `plans.isActive = false` | **Free** | `PLAN_INACTIVE` |
+| `PENDING` / `EXPIRED` / `CANCELLED` / `PAYMENT_FAILED` | **Free** | `STATUS_*` |
+| no subscription row at all | **Free** | `NO_SUBSCRIPTION` |
+| unknown status string | throws | — |
+
+Rows are loaded newest-first (`startDate desc, createdAt desc, id desc`) and the
+**newest genuinely in-force** one wins, so an account whose latest subscription
+lapsed keeps the older one that is still valid instead of being dropped to Free
+by an unlucky sort. The demotion is expressed as a `SubscriptionContext.status`
+handed to the existing `effectivePlan()`, so the fallback comparison itself is
+still the one in `src/lib/entitlements.ts`.
+
+`EntitlementContext` reports both views: `subscriptionRecord.storedStatus` (what
+the row says) and `subscriptionRecord.enforcedStatus` (what was enforced).
+
+### Usage periods
+`bootstrap.ts` created the first `UsagePeriod` and nothing ever rolled it
+forward. `ensureCurrentUsagePeriod()` is that missing step:
+
+- account-scoped — `accountId` only ever comes from `requireSession()`;
+- month bounds always from the existing `getUsagePeriodBounds()`, so rows line
+  up with the ones bootstrap wrote;
+- an existing period is **returned as found**: no `update`, no `delete`, so
+  `invoiceCount` is never reset and historical periods are never touched;
+- idempotent, and race-safe through the existing
+  `@@unique([accountId, periodStart, periodEnd])` constraint — the loser of a
+  concurrent create catches `P2002` (detected structurally, so it works with or
+  without a generated client) and re-reads the winner's row instead of retrying.
+
+**Subscription association:** `UsagePeriod.subscriptionId` is NOT NULL, so a new
+bucket points at the account's in-force subscription if it has one, otherwise at
+its newest row of any status (a Free-fallback account still needs a counter).
+Both are always rows of *this* account. The link is bookkeeping only —
+**entitlements are never derived from `UsagePeriod.subscriptionId`**, so a
+period still pointing at a since-lapsed PRO subscription grants nothing.
+An account with no subscription row at all raises `EntitlementDataError` rather
+than inventing a period.
+
+### Invoice quota
+`getInvoiceQuotaStatus()` returns `{ planKey, invoiceLimit, usedInvoices,
+remainingInvoices, canFinalize, warningLevel, periodStart, periodEnd,
+usagePeriodId, fallbackReason }`. `canFinalize` comes from the existing
+`canFinalizeInvoice()` and `warningLevel` from `invoiceQuotaWarningLevel()` —
+neither comparison is re-implemented.
+
+It is **deliberately read-only**: it creates no invoice, opens no period and
+increments nothing. A month with no bucket yet simply counts as 0 used. The
+atomic increment belongs to the finalize transaction (Phase 4), which will call
+`ensureCurrentUsagePeriod()` and bump `invoiceCount` in the same transaction.
+
+### Trust boundary
+None of the three entry points accepts an `accountId`, `subscriptionId`,
+`planKey`, `status` or limit. Their only inputs are `now` (a server-side time
+source, documented as never to be taken from request input) and an optional
+`Prisma.TransactionClient` for callers already inside a `$transaction`. Tests
+pass smuggled `{ accountId, subscriptionId, planKey, invoiceLimit }` objects and
+assert every query still uses the session account.
+
+### Verification
+- `npx vitest run` → **204/204 passing** (70 pre-existing + 134 new). Every
+  Task 1/Task 2 test still passes unchanged.
+- `npx tsc --noEmit` → **5 errors, exactly the pre-existing baseline**, none in
+  `src/server/entitlements/` or `src/lib/entitlements.ts`. Same single root
+  cause as documented in section 6: this sandbox cannot reach
+  `binaries.prisma.sh`, so `@prisma/client` is still the shipped stub.
+- Mutation-checked 10 ways, all caught: ignoring the `endDate` lapse, unscoping
+  the subscription lookup, dropping the `P2002` re-read, making the quota check
+  write, resetting `invoiceCount` on the fast path, honouring a deactivated
+  `Plan`, ignoring the supplied transaction client, removing the
+  `remainingInvoices` clamp, hard-coding a limit, and always preferring the
+  newest subscription.
+
+### Known divergences / deliberately deferred
+- `businessService.createBusiness` still picks the newest subscription row
+  (`findFirst … orderBy createdAt desc`) rather than the newest *in-force* one,
+  and still ignores `plans.isActive`. It now applies the date-lapse rule, so the
+  common cases agree; switching it to `resolveEntitlements()` would mean moving
+  its entitlement reads out of its own `$transaction`, which is a bigger change
+  than this task calls for. Noted for the phase that revisits business limits.
+- No atomic `invoiceCount` increment yet (Phase 4, with finalization).
+- No API routes, server actions, or UI — as instructed.
+
+## 9. Running locally (once you have the above)
 
 ```bash
 npm install
