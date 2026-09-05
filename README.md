@@ -158,7 +158,66 @@ User can never end up with two Accounts, even under a race condition.
 ### Not in scope for Phase 2 (deferred, as planned)
 Business switching UI, the entitlements module actually gating any real route, file uploads, and the rest of the dashboard — these are Phase 3+.
 
-## 7. Running locally (once you have the above)
+## 7. Phase 3 (in progress) — Business domain layer (server-side only)
+
+The server-side Business CRUD/domain layer. No UI, no API routes, no invoice
+logic — just the authorized domain functions the next phases will call.
+
+### Files created
+| File | Purpose |
+|---|---|
+| `src/server/business/businessService.ts` | `listBusinesses`, `getBusiness`, `createBusiness`, `updateBusiness`, `archiveBusiness` |
+| `src/server/business/schema.ts` | Zod create/update contracts + `ValidationError` translation |
+| `src/server/business/planContext.ts` | Pure mappers: Plan/Subscription rows → the `PlanContext`/`SubscriptionContext` shapes `src/lib/entitlements.ts` expects |
+| `src/server/business/businessService.test.ts` | 32 tests (Prisma + session mocked, real ownership guard) |
+| `src/server/business/planContext.test.ts` | 5 tests for the entitlement-context mappers |
+
+### Authorization
+Every function starts from `requireSession()`; `businessId` is only ever an
+identifier, resolved through `requireBusinessOwnership()` (404 when the row is
+missing, 403 when it belongs to another Account). No function accepts an
+`accountId` argument, and both Zod schemas are `.strict()`, so a payload
+carrying `accountId`/`id`/`isPrimary`/`isLocked`/`archivedAt` is rejected with
+`ValidationError` rather than silently ignored. Writes always use the
+session-derived `accountId` and the *verified* row's `id`.
+
+### Plan limits (via `src/lib/entitlements.ts`, never inline)
+`createBusiness` reads the account's newest Subscription + Plan and the FREE
+plan from the DB, maps them with `planContext.ts`, counts only that account's
+non-archived businesses, and calls `canCreateBusiness()`: FREE = 1, BASIC = 1,
+PRO = 3, with a non-ACTIVE subscription falling back to FREE limits
+(`effectivePlan`). Exceeding the limit throws `BusinessLimitReachedError`.
+
+### Conventions preserved from `bootstrap.ts`
+Business + BusinessProfile + InvoiceSettings are created in one transaction;
+exactly one Business per Account carries `isPrimary` (assigned server-side —
+the first live business, and re-assigned to the oldest remaining business when
+the primary one is archived).
+
+### Deletion is archiving
+`Business.archivedAt` already exists, so `archiveBusiness()` stamps it and
+returns the row; archived businesses drop out of `listBusinesses()` unless
+`{ includeArchived: true }` is passed. There is no hard-delete path anywhere in
+the module — Customers, Products, Invoices, snapshots and Files under an
+archived Business are untouched, and archiving is idempotent.
+
+### Verification
+- `npx vitest run` → **70/70 tests passing** (33 pre-existing + 37 new).
+- `npx tsc --noEmit` → **5 errors, exactly the pre-existing baseline** (none in
+  `src/server/business/`). The `$transaction` callbacks are annotated
+  `Prisma.TransactionClient`, so `tx` is strictly typed rather than inferred.
+  The 5 remaining errors all predate Phase 3 and share one root cause,
+  documented in section 6: this sandbox cannot reach `binaries.prisma.sh`, so
+  `node_modules/.prisma/client/default.d.ts` is still the shipped stub
+  (`export declare const PrismaClient: any`, line 19), which leaves model types
+  like `PlanKey`/`Business` unexported. They disappear once `prisma generate`
+  runs for real.
+- Mutation-checked: deliberately breaking the plan-limit gate, the account
+  scoping of the business count, the list filter, the archive-vs-delete
+  behaviour and the ownership guard each fails the suite, so the assertions are
+  load-bearing rather than vacuous.
+
+## 8. Running locally (once you have the above)
 
 ```bash
 npm install
