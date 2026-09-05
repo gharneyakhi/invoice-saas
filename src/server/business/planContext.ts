@@ -1,4 +1,5 @@
-import type { PlanContext, SubscriptionContext } from "@/lib/entitlements";
+import type { PlanContext, SubscriptionContext, SubscriptionWindow } from "@/lib/entitlements";
+import { evaluateSubscription } from "@/lib/entitlements";
 
 /**
  * Bridge between the authoritative Plan/Subscription rows and the *pure*
@@ -49,6 +50,17 @@ function toSubscriptionStatus(status: string): SubscriptionContext["status"] {
 }
 
 /**
+ * Validates a stored `subscriptions.status` string into the enum the
+ * entitlement system understands. Exported so the server-side resolver can
+ * report the *stored* status for diagnostics while enforcing a different,
+ * date-adjusted one. Throws on an unknown value rather than defaulting to
+ * something permissive.
+ */
+export function toStoredSubscriptionStatus(status: string): SubscriptionContext["status"] {
+  return toSubscriptionStatus(status);
+}
+
+/**
  * Only `enabled` PlanFeatures become usable feature keys — a row kept for
  * history with `enabled = false` must not grant anything.
  */
@@ -63,6 +75,23 @@ export function toPlanContext(row: PlanRow): PlanContext {
   };
 }
 
-export function toSubscriptionContext(status: string): SubscriptionContext {
-  return { status: toSubscriptionStatus(status) };
+/**
+ * Maps a stored subscription row onto the `SubscriptionContext` the pure
+ * entitlement functions consume.
+ *
+ * `window` is optional and purely additive: with no dates supplied this behaves
+ * exactly as it did before (the stored status alone decides), so existing
+ * callers and tests are unaffected. When the row's `startDate`/`endDate` are
+ * supplied, an `ACTIVE` row whose paid window has not started yet — or has
+ * already closed — is demoted to `PENDING`/`EXPIRED`, which makes
+ * `effectivePlan()` fall back to Free. The rule itself lives in
+ * `evaluateSubscription()` (src/lib/entitlements.ts), never here.
+ */
+export function toSubscriptionContext(
+  status: string,
+  window?: SubscriptionWindow,
+  now?: Date,
+): SubscriptionContext {
+  const storedStatus = toSubscriptionStatus(status);
+  return { status: evaluateSubscription(storedStatus, window ?? {}, now).status };
 }

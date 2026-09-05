@@ -20,3 +20,22 @@ export class BusinessLimitReachedError extends Error {
     this.name = "BusinessLimitReachedError";
   }
 }
+
+/**
+ * The entitlement dataset itself is missing or self-contradictory — e.g. the
+ * FREE plan row was never seeded (so there is no fallback baseline to enforce),
+ * or an Account has no Subscription row at all (so a `UsagePeriod`, whose
+ * `subscriptionId` column is NOT NULL, cannot be created honestly).
+ *
+ * Thrown instead of guessing: an entitlement resolver that cannot prove what an
+ * account is entitled to must refuse rather than assume the most permissive
+ * answer. Never constructed from a raw Prisma error, and it never carries one.
+ */
+export class EntitlementDataError extends Error {
+  readonly code = "ENTITLEMENT_DATA_ERROR" as const;
+
+  constructor(message = "Entitlement data is missing or inconsistent") {
+    super(message);
+    this.name = "EntitlementDataError";
+  }
+}
