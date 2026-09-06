@@ -21,6 +21,15 @@ export class BusinessLimitReachedError extends Error {
   }
 }
 
+export class InvoiceLimitReachedError extends Error {
+  readonly code = "INVOICE_LIMIT_REACHED" as const;
+
+  constructor(message = "Invoice limit reached for the current plan") {
+    super(message);
+    this.name = "InvoiceLimitReachedError";
+  }
+}
+
 /**
  * The entitlement dataset itself is missing or self-contradictory — e.g. the
  * FREE plan row was never seeded (so there is no fallback baseline to enforce),
