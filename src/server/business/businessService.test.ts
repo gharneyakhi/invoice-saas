@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { BusinessLimitReachedError, ValidationError } from "@/server/errors";
 
 /**
@@ -9,7 +9,8 @@ import { BusinessLimitReachedError, ValidationError } from "@/server/errors";
  *
  * `@/server/auth/requireBusinessOwnership` is deliberately NOT mocked, so the
  * real ownership guard runs against `prismaMock.business.findUnique` and the
- * 403/404 behaviour is covered end to end.
+ * 403/404 behaviour is covered end to end. The entitlement resolver and its
+ * pure subscription-selection/limit rules are also real, not mocked.
  */
 const prismaMock = vi.hoisted(() => ({
   business: {
@@ -31,7 +32,7 @@ const prismaMock = vi.hoisted(() => ({
     create: vi.fn(),
   },
   subscription: {
-    findFirst: vi.fn(),
+    findMany: vi.fn(),
   },
   plan: {
     findUnique: vi.fn(),
@@ -76,6 +77,7 @@ vi.mock("@/server/auth/requireSession", () => {
 });
 
 const SESSION = { userId: "user-1", accountId: "acc-1" };
+const NOW = new Date("2026-03-15T12:00:00.000Z");
 
 interface BusinessRowOverrides {
   id?: string;
@@ -108,6 +110,7 @@ function planRow(key: "FREE" | "BASIC" | "PRO", businessLimit: number, invoiceLi
   return {
     id: `plan-${key.toLowerCase()}`,
     key,
+    isActive: true,
     businessLimit,
     invoiceLimit,
     planFeatures: features.map((featureKey) => ({ enabled: true, feature: { key: featureKey } })),
@@ -120,7 +123,15 @@ const BASIC_PLAN = () => planRow("BASIC", 1, 10, ["EMAIL_SEND"]);
 const PRO_PLAN = () => planRow("PRO", 3, 50, ["MULTI_BUSINESS", "ADVANCED_REPORTS"]);
 
 function activeSubscription(plan: ReturnType<typeof PRO_PLAN>) {
-  return { id: "sub-1", accountId: "acc-1", status: "ACTIVE", createdAt: new Date("2026-01-01"), plan };
+  return {
+    id: "sub-1",
+    accountId: "acc-1",
+    status: "ACTIVE",
+    startDate: new Date("2026-03-01T00:00:00.000Z"),
+    endDate: new Date("2026-04-01T00:00:00.000Z"),
+    createdAt: new Date("2026-03-01T00:00:00.000Z"),
+    plan,
+  };
 }
 
 beforeEach(() => {
@@ -214,10 +225,19 @@ describe("getBusiness", () => {
 });
 
 describe("createBusiness", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("creates Business + BusinessProfile + InvoiceSettings under the session account when the plan allows it", async () => {
     const { createBusiness } = await import("./businessService");
 
-    prismaMock.subscription.findFirst.mockResolvedValue(activeSubscription(PRO_PLAN()));
+    prismaMock.subscription.findMany.mockResolvedValue([activeSubscription(PRO_PLAN())]);
     prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
     prismaMock.business.findMany.mockResolvedValue([{ id: "biz-1", isPrimary: true }]);
     prismaMock.business.create.mockResolvedValue(businessRow({ id: "biz-2", isPrimary: false }));
@@ -240,7 +260,7 @@ describe("createBusiness", () => {
   it("counts only the current account's live businesses toward the limit", async () => {
     const { createBusiness } = await import("./businessService");
 
-    prismaMock.subscription.findFirst.mockResolvedValue(activeSubscription(PRO_PLAN()));
+    prismaMock.subscription.findMany.mockResolvedValue([activeSubscription(PRO_PLAN())]);
     prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
     prismaMock.business.findMany.mockResolvedValue([]);
     prismaMock.business.create.mockResolvedValue(businessRow());
@@ -256,7 +276,7 @@ describe("createBusiness", () => {
   it("marks the account's first business as primary (primary-business convention)", async () => {
     const { createBusiness } = await import("./businessService");
 
-    prismaMock.subscription.findFirst.mockResolvedValue(activeSubscription(PRO_PLAN()));
+    prismaMock.subscription.findMany.mockResolvedValue([activeSubscription(PRO_PLAN())]);
     prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
     prismaMock.business.findMany.mockResolvedValue([]); // no live business yet -> no primary yet
     prismaMock.business.create.mockResolvedValue(businessRow({ id: "biz-new", isPrimary: true }));
@@ -274,7 +294,7 @@ describe("createBusiness", () => {
   ])("rejects creation with BusinessLimitReachedError when the %s limit (1 business) is reached", async (_planKey, plan) => {
     const { createBusiness } = await import("./businessService");
 
-    prismaMock.subscription.findFirst.mockResolvedValue(activeSubscription(plan));
+    prismaMock.subscription.findMany.mockResolvedValue([activeSubscription(plan)]);
     prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
     prismaMock.business.findMany.mockResolvedValue([{ id: "biz-1", isPrimary: true }]);
 
@@ -285,35 +305,40 @@ describe("createBusiness", () => {
     expect(prismaMock.invoiceSettings.create).not.toHaveBeenCalled();
   });
 
-  it("allows a third business on PRO but rejects the fourth (PRO limit = 3)", async () => {
+  it("allows up to three businesses on an in-force PRO subscription, but rejects the fourth", async () => {
     const { createBusiness } = await import("./businessService");
 
-    prismaMock.subscription.findFirst.mockResolvedValue(activeSubscription(PRO_PLAN()));
+    prismaMock.subscription.findMany.mockResolvedValue([activeSubscription(PRO_PLAN())]);
     prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
-    prismaMock.business.create.mockResolvedValue(businessRow({ id: "biz-4" }));
+    const existingBusinesses: Array<{ id: string; isPrimary: boolean }> = [];
 
-    prismaMock.business.findMany.mockResolvedValue([
-      { id: "biz-1", isPrimary: true },
-      { id: "biz-2", isPrimary: false },
-    ]);
-    await expect(createBusiness({ name: "سوم" })).resolves.toBeDefined();
+    for (let count = 0; count < 3; count += 1) {
+      const created = businessRow({ id: `biz-${count + 1}`, isPrimary: count === 0 });
+      prismaMock.business.findMany.mockResolvedValue([...existingBusinesses]);
+      prismaMock.business.create.mockResolvedValue(created);
 
-    prismaMock.business.findMany.mockResolvedValue([
-      { id: "biz-1", isPrimary: true },
-      { id: "biz-2", isPrimary: false },
-      { id: "biz-3", isPrimary: false },
-    ]);
-    await expect(createBusiness({ name: "چهارم" })).rejects.toBeInstanceOf(BusinessLimitReachedError);
+      await expect(createBusiness({ name: "کسب‌وکار" })).resolves.toEqual(created);
+      existingBusinesses.push({ id: created.id, isPrimary: created.isPrimary });
+    }
+
+    prismaMock.business.findMany.mockResolvedValue(existingBusinesses);
+    await expect(createBusiness({ name: "چهارم" })).rejects.toMatchObject({
+      code: "BUSINESS_LIMIT_REACHED",
+      message: "Business limit reached: the PRO plan allows 3 active business(es).",
+    });
+    expect(prismaMock.business.create).toHaveBeenCalledTimes(3);
+    expect(prismaMock.businessProfile.create).toHaveBeenCalledTimes(3);
+    expect(prismaMock.invoiceSettings.create).toHaveBeenCalledTimes(3);
   });
 
   it("falls back to FREE limits when the subscription is not ACTIVE", async () => {
     const { createBusiness } = await import("./businessService");
 
     // PRO plan (3 businesses) but EXPIRED -> effective limit is FREE's 1.
-    prismaMock.subscription.findFirst.mockResolvedValue({
+    prismaMock.subscription.findMany.mockResolvedValue([{
       ...activeSubscription(PRO_PLAN()),
       status: "EXPIRED",
-    });
+    }]);
     prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
     prismaMock.business.findMany.mockResolvedValue([{ id: "biz-1", isPrimary: true }]);
 
@@ -321,14 +346,209 @@ describe("createBusiness", () => {
     expect(prismaMock.business.create).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      reason: "expired by date",
+      newest: { ...activeSubscription(BASIC_PLAN()), endDate: new Date("2026-03-10T00:00:00.000Z") },
+    },
+    {
+      reason: "on an inactive plan",
+      newest: activeSubscription({ ...BASIC_PLAN(), isActive: false }),
+    },
+  ])("uses an older effective PRO subscription when the newest by createdAt is $reason", async ({ newest }) => {
+    const { createBusiness } = await import("./businessService");
+
+    prismaMock.subscription.findMany.mockResolvedValue([
+      { ...newest, id: "sub-new" },
+      {
+        ...activeSubscription(PRO_PLAN()),
+        id: "sub-old",
+        startDate: new Date("2026-02-01T00:00:00.000Z"),
+        createdAt: new Date("2026-02-01T00:00:00.000Z"),
+      },
+    ]);
+    prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
+    prismaMock.business.findMany.mockResolvedValue([
+      { id: "biz-1", isPrimary: true },
+      { id: "biz-2", isPrimary: false },
+    ]);
+    const created = businessRow({ id: "biz-3", isPrimary: false });
+    prismaMock.business.create.mockResolvedValue(created);
+
+    await expect(createBusiness({ name: "سوم" })).resolves.toEqual(created);
+    expect(prismaMock.business.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("enforces the older effective BASIC limit rather than a newer inactive PRO plan", async () => {
+    const { createBusiness } = await import("./businessService");
+
+    prismaMock.subscription.findMany.mockResolvedValue([
+      { ...activeSubscription({ ...PRO_PLAN(), isActive: false }), id: "sub-new" },
+      {
+        ...activeSubscription(BASIC_PLAN()),
+        id: "sub-old",
+        startDate: new Date("2026-02-01T00:00:00.000Z"),
+        createdAt: new Date("2026-02-01T00:00:00.000Z"),
+      },
+    ]);
+    prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
+    prismaMock.business.findMany.mockResolvedValue([{ id: "biz-1", isPrimary: true }]);
+
+    await expect(createBusiness({ name: "دوم" })).rejects.toMatchObject({
+      code: "BUSINESS_LIMIT_REACHED",
+      message: "Business limit reached: the BASIC plan allows 1 active business(es).",
+    });
+    expect(prismaMock.business.create).not.toHaveBeenCalled();
+    expect(prismaMock.businessProfile.create).not.toHaveBeenCalled();
+    expect(prismaMock.invoiceSettings.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { reason: "no subscription", subscriptions: [] },
+    {
+      reason: "date-expired PRO",
+      subscriptions: [{ ...activeSubscription(PRO_PLAN()), endDate: NOW }],
+    },
+    {
+      reason: "inactive PRO plan",
+      subscriptions: [activeSubscription({ ...PRO_PLAN(), isActive: false })],
+    },
+    {
+      reason: "not-yet-started PRO",
+      subscriptions: [{
+        ...activeSubscription(PRO_PLAN()),
+        startDate: new Date("2026-04-01T00:00:00.000Z"),
+        endDate: new Date("2026-05-01T00:00:00.000Z"),
+      }],
+    },
+    {
+      reason: "invalid subscription window",
+      subscriptions: [{ ...activeSubscription(PRO_PLAN()), endDate: new Date("2026-03-01T00:00:00.000Z") }],
+    },
+  ])("safely falls back to one FREE business for $reason", async ({ subscriptions }) => {
+    const { createBusiness } = await import("./businessService");
+
+    prismaMock.subscription.findMany.mockResolvedValue(subscriptions);
+    prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
+    prismaMock.business.findMany.mockResolvedValue([]);
+    const created = businessRow();
+    prismaMock.business.create.mockResolvedValue(created);
+
+    await expect(createBusiness({ name: "اول" })).resolves.toEqual(created);
+
+    prismaMock.business.findMany.mockResolvedValue([{ id: created.id, isPrimary: true }]);
+    await expect(createBusiness({ name: "دوم" })).rejects.toMatchObject({
+      code: "BUSINESS_LIMIT_REACHED",
+      message: "Business limit reached: the FREE plan allows 1 active business(es).",
+    });
+    expect(prismaMock.business.create).toHaveBeenCalledTimes(1);
+    expect(prismaMock.businessProfile.create).toHaveBeenCalledTimes(1);
+    expect(prismaMock.invoiceSettings.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed on an unknown plan key instead of granting its business limit", async () => {
+    const { createBusiness } = await import("./businessService");
+
+    prismaMock.subscription.findMany.mockResolvedValue([{
+      ...activeSubscription(PRO_PLAN()),
+      plan: { ...PRO_PLAN(), key: "UNKNOWN" },
+    }]);
+    prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
+
+    await expect(createBusiness({ name: "کسب‌وکار" })).rejects.toThrow(/Unknown plan key/);
+    expect(prismaMock.business.create).not.toHaveBeenCalled();
+    expect(prismaMock.businessProfile.create).not.toHaveBeenCalled();
+    expect(prismaMock.invoiceSettings.create).not.toHaveBeenCalled();
+  });
+
+  it("uses the transaction client and the same session account for entitlement reads, usage and all writes", async () => {
+    const { createBusiness } = await import("./businessService");
+    requireSession.mockResolvedValue({ userId: "user-2", accountId: "acc-2" });
+    const created = businessRow({ id: "biz-new", accountId: "acc-2" });
+    // Distinct delegates catch any accidental use of the global client, which
+    // the suite's default transaction double (prismaMock itself) cannot catch.
+    const tx = {
+      plan: { findUnique: vi.fn().mockResolvedValue(FREE_PLAN()) },
+      subscription: {
+        findMany: vi.fn().mockResolvedValue([{ ...activeSubscription(PRO_PLAN()), accountId: "acc-2" }]),
+      },
+      business: {
+        findMany: vi.fn().mockResolvedValue([]),
+        create: vi.fn().mockResolvedValue(created),
+      },
+      businessProfile: { create: vi.fn() },
+      invoiceSettings: { create: vi.fn() },
+    };
+    prismaMock.$transaction.mockImplementation(async (callback: (client: unknown) => unknown) => callback(tx));
+
+    await expect(createBusiness({ name: "کسب‌وکار" })).resolves.toEqual(created);
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(tx.plan.findUnique).toHaveBeenCalledWith({
+      where: { key: "FREE" },
+      include: { planFeatures: { include: { feature: true } } },
+    });
+    expect(tx.subscription.findMany).toHaveBeenCalledWith({
+      where: { accountId: "acc-2" },
+      orderBy: [{ startDate: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+      include: { plan: { include: { planFeatures: { include: { feature: true } } } } },
+    });
+    expect(tx.business.findMany).toHaveBeenCalledWith({
+      where: { accountId: "acc-2", archivedAt: null },
+      select: { id: true, isPrimary: true },
+    });
+    expect(tx.business.create).toHaveBeenCalledWith({
+      data: { accountId: "acc-2", name: "کسب‌وکار", isPrimary: true },
+    });
+    expect(tx.businessProfile.create).toHaveBeenCalledWith({
+      data: { businessId: "biz-new", businessName: "کسب‌وکار" },
+    });
+    expect(tx.invoiceSettings.create).toHaveBeenCalledWith({
+      data: { businessId: "biz-new", nextInvoiceNumber: 1 },
+    });
+    expect(prismaMock.plan.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.subscription.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.business.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.business.create).not.toHaveBeenCalled();
+    expect(prismaMock.businessProfile.create).not.toHaveBeenCalled();
+    expect(prismaMock.invoiceSettings.create).not.toHaveBeenCalled();
+  });
+
   it("refuses to create anything when the FREE plan is not seeded", async () => {
     const { createBusiness } = await import("./businessService");
 
-    prismaMock.subscription.findFirst.mockResolvedValue(null);
+    prismaMock.subscription.findMany.mockResolvedValue([]);
     prismaMock.plan.findUnique.mockResolvedValue(null);
 
-    await expect(createBusiness({ name: "کسب‌وکار" })).rejects.toThrow(/FREE plan is not seeded/);
+    await expect(createBusiness({ name: "کسب‌وکار" })).rejects.toMatchObject({
+      name: "Error",
+      message: "Cannot evaluate the business limit: the FREE plan is not seeded. Run `npm run prisma:seed` first.",
+    });
     expect(prismaMock.business.create).not.toHaveBeenCalled();
+    expect(prismaMock.businessProfile.create).not.toHaveBeenCalled();
+    expect(prismaMock.invoiceSettings.create).not.toHaveBeenCalled();
+  });
+
+  it("propagates unexpected entitlement read failures without creating anything", async () => {
+    const { createBusiness } = await import("./businessService");
+    const failure = new Error("Database unavailable");
+    prismaMock.plan.findUnique.mockRejectedValueOnce(failure);
+
+    await expect(createBusiness({ name: "کسب‌وکار" })).rejects.toBe(failure);
+    expect(prismaMock.business.create).not.toHaveBeenCalled();
+    expect(prismaMock.businessProfile.create).not.toHaveBeenCalled();
+    expect(prismaMock.invoiceSettings.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid session before validation or opening a transaction", async () => {
+    const { UnauthorizedError } = await import("@/server/auth/requireSession");
+    const { createBusiness } = await import("./businessService");
+    requireSession.mockRejectedValue(new UnauthorizedError());
+
+    await expect(createBusiness({ name: "   " })).rejects.toBeInstanceOf(UnauthorizedError);
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.plan.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.subscription.findMany).not.toHaveBeenCalled();
   });
 
   it("rejects an empty or whitespace-only name with ValidationError", async () => {
