@@ -333,7 +333,15 @@ export interface FinalizeInvoiceOptions {
  *  10. Writes immutable historical snapshots: `InvoiceSellerSnapshot` and `InvoiceCustomerSnapshot`.
  *  11. Derives authoritative payment state (`paidAmount`, `remainingAmount`, `status`).
  *  12. Sets `finalizedAt: now`.
- *  13. Executes entirely inside an atomic database transaction.
+ *  13. Executes entirely inside an atomic database transaction, and locks the
+ *      invoice row (`SELECT ... FOR UPDATE`) as the first statement so that
+ *      duplicate/concurrent finalizations of the same invoice serialize and
+ *      the loser is rejected by the DRAFT check before it writes anything.
+ *
+ * Numbering / quota / snapshots rely on the transaction: the counter
+ * increment, quota increment, snapshot inserts and the conditional invoice
+ * update either all commit or all roll back, so a failed finalization never
+ * permanently consumes an official number or a quota unit.
  */
 export async function finalizeInvoice(
   invoiceIdOrOptions: string | ({ invoiceId: string } & FinalizeInvoiceOptions),
@@ -367,7 +375,30 @@ export async function finalizeInvoice(
   const now = options.now ?? new Date();
 
   const runWithTx = async (tx: Prisma.TransactionClient) => {
-    // 1. Load the complete invoice and business
+    // 0. Lock the invoice row FIRST — before it is read and before anything
+    //    is written. This is the same minimal PostgreSQL lock the payment
+    //    service takes (`SELECT id FROM "invoices" WHERE id = $1 FOR UPDATE`,
+    //    id bound as a parameter), and it exists for duplicate/concurrent
+    //    finalize requests on the SAME invoice:
+    //
+    //    Without it, two finalizations both pass the DRAFT check on a
+    //    non-locked read; the loser then serializes at the UsagePeriod row,
+    //    and once the winner commits it still increments the quota, allocates
+    //    the next official number and only fails at the seller-snapshot
+    //    unique index (a raw Prisma P2002). PostgreSQL rolls all of that back,
+    //    so the end state was already consistent — but the loser surfaced an
+    //    infrastructure error instead of the domain ValidationError and
+    //    churned the quota/number rows first.
+    //
+    //    With the lock, the loser waits here until the winner commits, its
+    //    subsequent read (READ COMMITTED: a fresh snapshot per statement) sees
+    //    the committed finalized row, and step 4 rejects it cleanly before any
+    //    write. It also serializes finalization against concurrent payment
+    //    mutations on the same invoice, which take the same lock. A missing
+    //    invoice locks nothing and falls through to the NotFoundError below.
+    await tx.$queryRaw`SELECT id FROM "invoices" WHERE id = ${invoiceId} FOR UPDATE`;
+
+    // 1. Load the complete invoice and business (authoritative: post-lock)
     const invoice = await tx.invoice.findUnique({
       where: { id: invoiceId },
       include: {
