@@ -336,19 +336,33 @@ export interface FinalizeInvoiceOptions {
  *  13. Executes entirely inside an atomic database transaction.
  */
 export async function finalizeInvoice(
-  invoiceIdOrOptions: string | { invoiceId: string; now?: Date },
+  invoiceIdOrOptions: string | ({ invoiceId: string } & FinalizeInvoiceOptions),
   maybeOptions: FinalizeInvoiceOptions = {},
 ): Promise<InvoiceRecord> {
+  // Null-safe argument discrimination. `typeof null === "object"`, so a bare
+  // `null` used to fall into the options-object branch and crash with a raw
+  // TypeError on property access; `null`, `undefined`, primitives and objects
+  // without a usable invoice ID must all yield the established ValidationError
+  // instead. The object form is only taken for a non-null object; everything
+  // else flows into the invoiceId guard below as-is.
+  const options: FinalizeInvoiceOptions =
+    invoiceIdOrOptions !== null && typeof invoiceIdOrOptions === "object"
+      ? invoiceIdOrOptions
+      : maybeOptions;
   const invoiceId =
-    typeof invoiceIdOrOptions === "string" ? invoiceIdOrOptions : invoiceIdOrOptions.invoiceId;
-  const options =
-    typeof invoiceIdOrOptions === "object" ? invoiceIdOrOptions : maybeOptions;
+    invoiceIdOrOptions !== null && typeof invoiceIdOrOptions === "object"
+      ? invoiceIdOrOptions.invoiceId
+      : invoiceIdOrOptions;
 
-  if (!invoiceId || typeof invoiceId !== "string" || invoiceId.trim() === "") {
+  if (typeof invoiceId !== "string" || invoiceId.trim() === "") {
     throw new ValidationError("Invoice ID is required");
   }
 
-  // Session verification
+  // Session verification — executed exactly once per finalization. The session
+  // resolved here is handed to the internal entitlement / usage-period helpers
+  // (server-to-server), which would otherwise repeat this same requireSession()
+  // round-trip two more times. The session still originates exclusively from
+  // requireSession(); no caller can supply one from request input.
   const session = await requireSession();
   const now = options.now ?? new Date();
 
@@ -462,9 +476,11 @@ export async function finalizeInvoice(
 
     const calcResult = calculateInvoice(calculationInput);
 
-    // 8. Entitlement & Quota Check (inside the transaction)
-    const entitlements = await resolveEntitlements({ client: tx, now });
-    const period = await ensureCurrentUsagePeriod({ client: tx, now });
+    // 8. Entitlement & Quota Check (inside the transaction) — the already
+    //    verified session is passed through so these internal helpers do not
+    //    re-run requireSession() redundantly.
+    const entitlements = await resolveEntitlements({ client: tx, now, session });
+    const period = await ensureCurrentUsagePeriod({ client: tx, now, session });
     const effectiveLimit = entitlements.invoiceLimit;
 
     // Database-level atomic quota increment: only succeeds if current invoiceCount < limit

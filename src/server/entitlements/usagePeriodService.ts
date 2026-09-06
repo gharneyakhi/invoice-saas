@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getUsagePeriodBounds } from "@/lib/usage-period";
-import { requireSession } from "@/server/auth/requireSession";
+import { requireSession, type AuthenticatedContext } from "@/server/auth/requireSession";
 import { EntitlementDataError } from "@/server/errors";
 import { SUBSCRIPTION_ORDER_BY, selectCurrentSubscription } from "@/server/entitlements/subscriptionSelection";
 
@@ -70,6 +70,16 @@ export interface UsagePeriodOptions {
   now?: Date;
   /** Optional transaction client, for callers already inside a `$transaction`. */
   client?: Prisma.TransactionClient;
+  /**
+   * Already-authenticated session context for internal server-to-server calls.
+   *
+   * A caller that has already run `requireSession()` (invoice finalization, for
+   * example) passes its session here so the period lookup does not execute a
+   * second redundant session round-trip. Server-to-server only: the value is
+   * produced exclusively by `requireSession()` and never taken from request
+   * input, so every external caller keeps authenticating exactly as before.
+   */
+  session?: AuthenticatedContext;
 }
 
 /**
@@ -113,7 +123,7 @@ function isUniqueConstraintViolation(error: unknown): boolean {
 export async function getCurrentUsagePeriod(
   options: UsagePeriodOptions = {},
 ): Promise<UsagePeriodRecord | null> {
-  const { accountId } = await requireSession();
+  const { accountId } = options.session ?? (await requireSession());
   const db: Prisma.TransactionClient = options.client ?? prisma;
   const bounds = getUsagePeriodBounds(options.now ?? new Date());
 
@@ -137,7 +147,7 @@ export async function getCurrentUsagePeriod(
 export async function ensureCurrentUsagePeriod(
   options: UsagePeriodOptions = {},
 ): Promise<UsagePeriodRecord> {
-  const { accountId } = await requireSession();
+  const { accountId } = options.session ?? (await requireSession());
   const db: Prisma.TransactionClient = options.client ?? prisma;
   // One instant for the whole call, so the month boundaries and the choice of
   // subscription can never straddle a boundary and disagree with each other.
