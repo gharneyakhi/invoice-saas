@@ -2,7 +2,7 @@ import type { Prisma } from "@prisma/client";
 import type { PlanContext, SubscriptionContext, UsageContext } from "@/lib/entitlements";
 import { canCreateBusiness, effectivePlan, hasFeature } from "@/lib/entitlements";
 import { prisma } from "@/lib/prisma";
-import { requireSession } from "@/server/auth/requireSession";
+import { requireSession, type AuthenticatedContext } from "@/server/auth/requireSession";
 import { toPlanContext } from "@/server/business/planContext";
 import { EntitlementDataError } from "@/server/errors";
 import {
@@ -48,6 +48,18 @@ export interface ResolveEntitlementsOptions {
    * the same connection and snapshot instead of opening a second one.
    */
   client?: Prisma.TransactionClient;
+  /**
+   * Already-authenticated session context for internal server-to-server calls.
+   *
+   * A service that has already called `requireSession()` (invoice finalization,
+   * for example) passes its session here so this resolver does not execute a
+   * second (redundant) session round-trip. The value is never taken from
+   * request input: it is produced only by `requireSession()` and travels
+   * between server modules, so the trust model is unchanged — the session still
+   * originates exclusively from the server-side session cookie. Every external
+   * caller omits this field and authenticates exactly as before.
+   */
+  session?: AuthenticatedContext;
 }
 
 /** Diagnostics-safe view of the subscription behind a resolved entitlement. */
@@ -106,7 +118,9 @@ export interface EntitlementContext {
 export async function resolveEntitlements(
   options: ResolveEntitlementsOptions = {},
 ): Promise<EntitlementContext> {
-  const { userId, accountId } = await requireSession();
+  // Internal callers that already hold a session from `requireSession()` pass
+  // it through; everyone else authenticates here. No third source exists.
+  const { userId, accountId } = options.session ?? (await requireSession());
   const db: Prisma.TransactionClient = options.client ?? prisma;
   const now = options.now ?? new Date();
 
