@@ -1,11 +1,10 @@
 import type { Prisma } from "@prisma/client";
-import type { PlanContext, SubscriptionContext, UsageContext } from "@/lib/entitlements";
-import { canCreateBusiness, effectivePlan } from "@/lib/entitlements";
+import type { UsageContext } from "@/lib/entitlements";
 import { prisma } from "@/lib/prisma";
 import { requireBusinessOwnership } from "@/server/auth/requireBusinessOwnership";
 import { requireSession } from "@/server/auth/requireSession";
-import { BusinessLimitReachedError } from "@/server/errors";
-import { toPlanContext, toSubscriptionContext } from "@/server/business/planContext";
+import { BusinessLimitReachedError, EntitlementDataError } from "@/server/errors";
+import { entitlementCanCreateBusiness, resolveEntitlements } from "@/server/entitlements/entitlementService";
 import { parseCreateBusinessInput, parseUpdateBusinessInput } from "@/server/business/schema";
 
 /**
@@ -100,47 +99,32 @@ export async function getBusiness(businessId: string): Promise<BusinessRecord> {
 /**
  * Creates a Business for the authenticated account, gated by the centralized
  * entitlement system (section 45): FREE = 1, BASIC = 1, PRO = 3 businesses,
- * with an inactive subscription falling back to FREE limits.
+ * using the genuinely in-force subscription on an active plan, or FREE limits
+ * when none grants access.
  *
  * The whole write happens in one transaction so a failure partway through
  * cannot leave a Business without its BusinessProfile/InvoiceSettings.
  */
 export async function createBusiness(input: unknown): Promise<BusinessRecord> {
-  const { accountId } = await requireSession();
+  // Preserve authentication before validation; the resolver revalidates the
+  // session and supplies the account used for all transactional reads/writes.
+  await requireSession();
   const data = parseCreateBusinessInput(input);
 
   return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    // ---- Entitlement inputs, read from the DB, never from the request ----
-    const subscriptionRow = await tx.subscription.findFirst({
-      where: { accountId },
-      orderBy: { createdAt: "desc" },
-      include: { plan: { include: { planFeatures: { include: { feature: true } } } } },
+    // Resolve on this transaction's client: subscription selection, plan
+    // validity and Free fallback must match every other entitlement check
+    // without moving any entitlement reads outside the transaction.
+    const entitlements = await resolveEntitlements({ client: tx }).catch((error: unknown) => {
+      if (error instanceof EntitlementDataError) {
+        // Preserve createBusiness's existing unseeded-FREE error contract.
+        throw new Error(
+          "Cannot evaluate the business limit: the FREE plan is not seeded. Run `npm run prisma:seed` first.",
+        );
+      }
+      throw error;
     });
-
-    const freePlanRow = await tx.plan.findUnique({
-      where: { key: "FREE" },
-      include: { planFeatures: { include: { feature: true } } },
-    });
-    if (!freePlanRow) {
-      // Same guard as bootstrap.ts: without the FREE row there is no fallback
-      // limit to enforce, and refusing is safer than assuming an unlimited plan.
-      throw new Error(
-        "Cannot evaluate the business limit: the FREE plan is not seeded. Run `npm run prisma:seed` first.",
-      );
-    }
-
-    const freePlan = toPlanContext(freePlanRow);
-    // An account with no subscription row at all is treated exactly like a
-    // non-ACTIVE subscription: `effectivePlan()` drops it to FREE limits.
-    const plan: PlanContext = subscriptionRow ? toPlanContext(subscriptionRow.plan) : freePlan;
-    // The row's own startDate/endDate are passed along so a subscription that
-    // still says ACTIVE after its window closed is demoted to FREE here too —
-    // the same rule the entitlement resolver applies (see
-    // `evaluateSubscription()` in src/lib/entitlements.ts). Omitting the dates
-    // would keep the old status-only behaviour.
-    const subscription: SubscriptionContext = subscriptionRow
-      ? toSubscriptionContext(subscriptionRow.status, subscriptionRow)
-      : { status: "EXPIRED" };
+    const { accountId, plan } = entitlements;
 
     // Only this account's live businesses count toward the limit. Archived
     // ones are excluded because archiving is how a Business is retired —
@@ -158,10 +142,9 @@ export async function createBusiness(input: unknown): Promise<BusinessRecord> {
       currentPeriodInvoiceCount: 0,
     };
 
-    if (!canCreateBusiness(plan, subscription, freePlan, usage)) {
-      const effective = effectivePlan(plan, subscription, freePlan);
+    if (!entitlementCanCreateBusiness(entitlements, usage)) {
       throw new BusinessLimitReachedError(
-        `Business limit reached: the ${effective.planKey} plan allows ${effective.businessLimit} active business(es).`,
+        `Business limit reached: the ${plan.planKey} plan allows ${plan.businessLimit} active business(es).`,
       );
     }
 
