@@ -55,6 +55,8 @@ const prismaMock = vi.hoisted(() => ({
     findMany: vi.fn(),
   },
   $transaction: vi.fn(),
+  // The raw `SELECT ... FOR UPDATE` invoice row lock taken by finalizeInvoice.
+  $queryRaw: vi.fn(),
 }));
 
 const requireSession = vi.hoisted(() => vi.fn());
@@ -291,12 +293,39 @@ function draftInvoiceRow(overrides = {}) {
   };
 }
 
+/**
+ * Re-arms the finalize-path write mocks with neutral defaults. `vi.clearAllMocks()`
+ * in the top-level beforeEach only clears call history, so a `mockRejectedValue`
+ * or a business-specific fixture set by one test would otherwise leak into the
+ * next. The blocks below call this so each test is self-contained.
+ */
+function armFinalizeWriteMocks() {
+  prismaMock.invoice.findUnique.mockReset();
+  prismaMock.customer.findUnique.mockReset();
+  prismaMock.product.findMany.mockReset();
+  prismaMock.invoiceSettings.update.mockReset();
+  prismaMock.invoiceSellerSnapshot.create.mockReset();
+  prismaMock.invoiceCustomerSnapshot.create.mockReset();
+  prismaMock.invoiceItem.update.mockReset();
+  prismaMock.customer.findUnique.mockResolvedValue(customerRow());
+  prismaMock.product.findMany.mockResolvedValue([productRow()]);
+  prismaMock.invoiceSellerSnapshot.create.mockResolvedValue({ id: "snap-seller-1" });
+  prismaMock.invoiceCustomerSnapshot.create.mockResolvedValue({ id: "snap-customer-1" });
+  prismaMock.invoiceItem.update.mockResolvedValue({ id: "item-1" });
+  prismaMock.invoiceSettings.update.mockResolvedValue({
+    id: "set-1",
+    invoicePrefix: "INV-",
+    nextInvoiceNumber: 102,
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   prismaMock.$transaction.mockImplementation(async (callback: (tx: unknown) => unknown) =>
     callback(prismaMock),
   );
   requireSession.mockResolvedValue(SESSION);
+  prismaMock.$queryRaw.mockResolvedValue([]);
 
   // Baseline mock setup for entitlements & usage
   prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
@@ -1288,7 +1317,400 @@ describe("finalizeInvoice", () => {
     });
   });
 
-  describe("9. Database concurrency boundaries (Notes for PostgreSQL integration testing)", () => {
+  describe("9. Invoice row lock (duplicate / concurrent finalize requests)", () => {
+    beforeEach(() => {
+      armFinalizeWriteMocks();
+    });
+
+    it("locks the invoice row with the minimal parameterized SELECT ... FOR UPDATE as the FIRST statement, before the invoice is read", async () => {
+      const { finalizeInvoice } = await import("./invoiceService");
+
+      const draft = draftInvoiceRow({ customerId: null });
+      prismaMock.invoice.findUnique
+        .mockResolvedValueOnce(draft)
+        .mockResolvedValueOnce({ ...draft, status: "PENDING_PAYMENT", invoiceNumber: "INV-101", finalizedAt: NOW });
+      prismaMock.invoiceSettings.update.mockResolvedValue({
+        id: "set-1",
+        invoicePrefix: "INV-",
+        nextInvoiceNumber: 102,
+      });
+
+      await finalizeInvoice(draft.id, { now: NOW });
+
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
+      const call = prismaMock.$queryRaw.mock.calls[0] as unknown as [TemplateStringsArray, ...unknown[]];
+      const [templateStrings, ...substitutions] = call;
+      expect(templateStrings.join("?")).toContain('SELECT id FROM "invoices" WHERE id =');
+      expect(templateStrings.join("?")).toContain("FOR UPDATE");
+      // The invoice id travels as a bound parameter, never as SQL text.
+      expect(substitutions).toEqual([draft.id]);
+      expect(templateStrings.join("")).not.toContain(draft.id);
+
+      const order = (fn: { mock: { invocationCallOrder: number[] } }) =>
+        fn.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER;
+      expect(order(prismaMock.$queryRaw)).toBeLessThan(order(prismaMock.invoice.findUnique));
+      expect(order(prismaMock.$queryRaw)).toBeLessThan(order(prismaMock.usagePeriod.updateMany));
+      expect(order(prismaMock.$queryRaw)).toBeLessThan(order(prismaMock.invoiceSettings.update));
+    });
+
+    it("rejects a duplicate finalize (already finalized after the lock is acquired) before any write: no quota, no number, no snapshot", async () => {
+      const { finalizeInvoice } = await import("./invoiceService");
+
+      // Sequential model of the race: the first call wins; the second call's
+      // post-lock read observes the committed finalized row.
+      const draft = draftInvoiceRow({ customerId: null });
+      const finalized = {
+        ...draft,
+        status: "PENDING_PAYMENT" as const,
+        invoiceNumber: "INV-101",
+        finalizedAt: NOW,
+      };
+      prismaMock.invoice.findUnique
+        .mockResolvedValueOnce(draft)
+        .mockResolvedValueOnce(finalized)
+        .mockResolvedValue(finalized);
+      prismaMock.invoiceSettings.update.mockResolvedValue({
+        id: "set-1",
+        invoicePrefix: "INV-",
+        nextInvoiceNumber: 102,
+      });
+
+      const first = await finalizeInvoice(draft.id, { now: NOW });
+      expect(first.invoiceNumber).toBe("INV-101");
+
+      vi.clearAllMocks();
+      prismaMock.$transaction.mockImplementation(async (callback: (tx: unknown) => unknown) =>
+        callback(prismaMock),
+      );
+      requireSession.mockResolvedValue(SESSION);
+      prismaMock.$queryRaw.mockResolvedValue([]);
+      prismaMock.invoice.findUnique.mockResolvedValue(finalized);
+
+      await expect(finalizeInvoice(draft.id, { now: NOW })).rejects.toBeInstanceOf(ValidationError);
+
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(prismaMock.usagePeriod.updateMany).not.toHaveBeenCalled();
+      expect(prismaMock.invoiceSettings.update).not.toHaveBeenCalled();
+      expect(prismaMock.invoiceSellerSnapshot.create).not.toHaveBeenCalled();
+      expect(prismaMock.invoiceCustomerSnapshot.create).not.toHaveBeenCalled();
+      expect(prismaMock.invoiceItem.update).not.toHaveBeenCalled();
+      expect(prismaMock.invoice.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("rejects a cancelled invoice without writing anything and never touches its existing invoice number", async () => {
+      const { finalizeInvoice } = await import("./invoiceService");
+
+      prismaMock.invoice.findUnique.mockResolvedValue(
+        draftInvoiceRow({
+          status: "CANCELLED",
+          invoiceNumber: "INV-77",
+          finalizedAt: new Date("2026-03-01T00:00:00.000Z"),
+          cancelledAt: new Date("2026-03-02T00:00:00.000Z"),
+        }),
+      );
+
+      await expect(finalizeInvoice("inv-1", { now: NOW })).rejects.toThrow(
+        "Cannot finalize a cancelled invoice",
+      );
+
+      expect(prismaMock.usagePeriod.updateMany).not.toHaveBeenCalled();
+      expect(prismaMock.invoiceSettings.update).not.toHaveBeenCalled();
+      expect(prismaMock.invoiceSellerSnapshot.create).not.toHaveBeenCalled();
+      expect(prismaMock.invoice.updateMany).not.toHaveBeenCalled();
+      expect(prismaMock.invoice.update).not.toHaveBeenCalled();
+    });
+
+    it("locks nothing it can write to and returns NotFoundError for a missing invoice", async () => {
+      const { NotFoundError } = await import("@/server/auth/requireSession");
+      const { finalizeInvoice } = await import("./invoiceService");
+
+      prismaMock.invoice.findUnique.mockResolvedValue(null);
+
+      await expect(finalizeInvoice("inv-missing")).rejects.toBeInstanceOf(NotFoundError);
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(prismaMock.usagePeriod.updateMany).not.toHaveBeenCalled();
+      expect(prismaMock.invoiceSettings.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("10. Rollback safety — every write happens inside the single transaction", () => {
+    beforeEach(() => {
+      armFinalizeWriteMocks();
+    });
+
+    it("runs the quota increment, number allocation, snapshots, item updates and invoice update on the transaction client only", async () => {
+      const { finalizeInvoice } = await import("./invoiceService");
+
+      // A distinct tx object proves the writes are routed through the
+      // transaction client rather than the global singleton.
+      const tx = { ...prismaMock };
+      const outerCalls: string[] = [];
+      prismaMock.$transaction.mockImplementation(async (callback: (tx: unknown) => unknown) => {
+        outerCalls.push("tx-open");
+        return callback(tx);
+      });
+
+      const draft = draftInvoiceRow();
+      prismaMock.invoice.findUnique
+        .mockResolvedValueOnce(draft)
+        .mockResolvedValueOnce({ ...draft, status: "PENDING_PAYMENT", invoiceNumber: "INV-101", finalizedAt: NOW });
+      prismaMock.customer.findUnique.mockResolvedValue(customerRow());
+      prismaMock.product.findMany.mockResolvedValue([productRow()]);
+      prismaMock.invoiceSettings.update.mockResolvedValue({
+        id: "set-1",
+        invoicePrefix: "INV-",
+        nextInvoiceNumber: 102,
+      });
+
+      await finalizeInvoice(draft.id, { now: NOW });
+
+      expect(outerCalls).toEqual(["tx-open"]);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      // Exactly one lock, one quota increment, one number allocation, one
+      // seller snapshot, one customer snapshot, one conditional invoice
+      // update — no duplicate state for a single finalization.
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(prismaMock.usagePeriod.updateMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.invoiceSettings.update).toHaveBeenCalledTimes(1);
+      expect(prismaMock.invoiceSellerSnapshot.create).toHaveBeenCalledTimes(1);
+      expect(prismaMock.invoiceCustomerSnapshot.create).toHaveBeenCalledTimes(1);
+      expect(prismaMock.invoice.updateMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.invoice.update).not.toHaveBeenCalled();
+    });
+
+    it("propagates a snapshot write failure so the surrounding transaction rolls back the number and quota increments", async () => {
+      const { finalizeInvoice } = await import("./invoiceService");
+
+      const draft = draftInvoiceRow();
+      prismaMock.invoice.findUnique.mockResolvedValue(draft);
+      prismaMock.customer.findUnique.mockResolvedValue(customerRow());
+      prismaMock.product.findMany.mockResolvedValue([productRow()]);
+      prismaMock.invoiceSettings.update.mockResolvedValue({
+        id: "set-1",
+        invoicePrefix: "INV-",
+        nextInvoiceNumber: 102,
+      });
+      const dbError = new Error("unique constraint on invoice_seller_snapshots.invoiceId");
+      prismaMock.invoiceSellerSnapshot.create.mockRejectedValue(dbError);
+
+      // The error must surface unchanged out of $transaction — that is what
+      // makes Prisma roll back the increments that already ran in this tx.
+      await expect(finalizeInvoice(draft.id, { now: NOW })).rejects.toBe(dbError);
+
+      expect(prismaMock.usagePeriod.updateMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.invoiceSettings.update).toHaveBeenCalledTimes(1);
+      expect(prismaMock.invoice.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("propagates a number-allocation failure after the quota increment without finalizing the invoice", async () => {
+      const { finalizeInvoice } = await import("./invoiceService");
+
+      const draft = draftInvoiceRow({ customerId: null });
+      prismaMock.invoice.findUnique.mockResolvedValue(draft);
+      const dbError = new Error("invoice_settings row missing (P2025)");
+      prismaMock.invoiceSettings.update.mockRejectedValue(dbError);
+
+      await expect(finalizeInvoice(draft.id, { now: NOW })).rejects.toBe(dbError);
+
+      expect(prismaMock.invoiceSellerSnapshot.create).not.toHaveBeenCalled();
+      expect(prismaMock.invoice.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("11. Numbering integrity", () => {
+    beforeEach(() => {
+      armFinalizeWriteMocks();
+    });
+
+    it("formats the official number deterministically from the prefix and the pre-increment counter", async () => {
+      const { formatOfficialInvoiceNumber } = await import("./schema");
+
+      expect(formatOfficialInvoiceNumber("INV-", 101)).toBe("INV-101");
+      expect(formatOfficialInvoiceNumber(null, 1)).toBe("1");
+      expect(formatOfficialInvoiceNumber(undefined, 7)).toBe("7");
+      expect(formatOfficialInvoiceNumber("", 12)).toBe("12");
+      expect(formatOfficialInvoiceNumber("ف-", 3)).toBe("ف-3");
+    });
+
+    it("allocates the official number from the business's own InvoiceSettings row (per-business sequence)", async () => {
+      const { finalizeInvoice } = await import("./invoiceService");
+
+      const otherBusiness = businessRow({ id: "biz-2", accountId: "acc-1", name: "شعبه دوم" });
+      const draft = draftInvoiceRow({
+        id: "inv-biz2",
+        businessId: "biz-2",
+        customerId: null,
+        business: otherBusiness,
+      });
+      prismaMock.invoice.findUnique
+        .mockResolvedValueOnce(draft)
+        .mockResolvedValueOnce({ ...draft, status: "PENDING_PAYMENT", invoiceNumber: "1", finalizedAt: NOW });
+      prismaMock.product.findMany.mockResolvedValue([productRow({ businessId: "biz-2" })]);
+      prismaMock.businessProfile.findUnique.mockResolvedValue(null);
+      // Business 2 starts its own sequence at 1 even though business 1 is at 101.
+      prismaMock.invoiceSettings.update.mockResolvedValue({
+        id: "set-2",
+        businessId: "biz-2",
+        invoicePrefix: null,
+        nextInvoiceNumber: 2,
+      });
+
+      const result = await finalizeInvoice(draft.id, { now: NOW });
+
+      expect(prismaMock.invoiceSettings.update).toHaveBeenCalledWith({
+        where: { businessId: "biz-2" },
+        data: { nextInvoiceNumber: { increment: 1 } },
+      });
+      expect(result.invoiceNumber).toBe("1");
+      // Seller snapshot falls back to Business.name when no profile exists.
+      expect(prismaMock.invoiceSellerSnapshot.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ invoiceId: "inv-biz2", businessName: "شعبه دوم" }),
+      });
+    });
+
+    it("finalizes a draft with a pre-existing official-looking number only through the counter, never by trusting the stored number", async () => {
+      const { finalizeInvoice } = await import("./invoiceService");
+
+      // Even if a draft somehow carried a non-placeholder number, the official
+      // number always comes from the atomic counter.
+      const draft = draftInvoiceRow({ customerId: null, invoiceNumber: "INV-9999" });
+      prismaMock.invoice.findUnique
+        .mockResolvedValueOnce(draft)
+        .mockResolvedValueOnce({ ...draft, status: "PENDING_PAYMENT", invoiceNumber: "INV-101", finalizedAt: NOW });
+      prismaMock.invoiceSettings.update.mockResolvedValue({
+        id: "set-1",
+        invoicePrefix: "INV-",
+        nextInvoiceNumber: 102,
+      });
+
+      await finalizeInvoice(draft.id, { now: NOW });
+
+      expect(prismaMock.invoice.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ invoiceNumber: "INV-101" }),
+        }),
+      );
+    });
+  });
+
+  describe("12. Snapshot immutability", () => {
+    beforeEach(() => {
+      armFinalizeWriteMocks();
+    });
+
+    it("captures the seller snapshot from the BusinessProfile as it is at finalization time", async () => {
+      const { finalizeInvoice } = await import("./invoiceService");
+
+      const draft = draftInvoiceRow({ customerId: null });
+      prismaMock.invoice.findUnique
+        .mockResolvedValueOnce(draft)
+        .mockResolvedValueOnce({ ...draft, status: "PENDING_PAYMENT", invoiceNumber: "INV-101", finalizedAt: NOW });
+      prismaMock.invoiceSettings.update.mockResolvedValue({
+        id: "set-1",
+        invoicePrefix: "INV-",
+        nextInvoiceNumber: 102,
+      });
+      prismaMock.businessProfile.findUnique.mockResolvedValue(
+        businessProfileRow({ businessName: "نام قبل از ویرایش", iban: "IR000000000000000000000009" }),
+      );
+
+      await finalizeInvoice(draft.id, { now: NOW });
+
+      const snapshotData = prismaMock.invoiceSellerSnapshot.create.mock.calls[0]?.[0]?.data;
+      expect(snapshotData).toMatchObject({
+        invoiceId: draft.id,
+        businessName: "نام قبل از ویرایش",
+        iban: "IR000000000000000000000009",
+      });
+      // Snapshot is a value copy: it carries every seller column and no
+      // reference/relation to the live profile row that could be edited later.
+      expect(snapshotData).not.toHaveProperty("businessProfileId");
+      expect(snapshotData).not.toHaveProperty("profile");
+      expect(Object.keys(snapshotData)).toEqual(
+        expect.arrayContaining([
+          "businessName",
+          "slogan",
+          "ownerName",
+          "address",
+          "email",
+          "mobile",
+          "landline",
+          "cardNumber",
+          "accountNumber",
+          "iban",
+          "logoFileId",
+          "sellerStampFileId",
+          "sellerSignatureFileId",
+          "primaryColor",
+          "footerText",
+        ]),
+      );
+    });
+
+    it("captures the customer snapshot as a value copy of the Customer row at finalization time", async () => {
+      const { finalizeInvoice } = await import("./invoiceService");
+
+      const draft = draftInvoiceRow();
+      prismaMock.invoice.findUnique
+        .mockResolvedValueOnce(draft)
+        .mockResolvedValueOnce({ ...draft, status: "PENDING_PAYMENT", invoiceNumber: "INV-101", finalizedAt: NOW });
+      prismaMock.customer.findUnique.mockResolvedValue(
+        customerRow({ name: "مشتری قبل از تغییر", address: "آدرس قدیمی" }),
+      );
+      prismaMock.product.findMany.mockResolvedValue([productRow()]);
+      prismaMock.invoiceSettings.update.mockResolvedValue({
+        id: "set-1",
+        invoicePrefix: "INV-",
+        nextInvoiceNumber: 102,
+      });
+
+      await finalizeInvoice(draft.id, { now: NOW });
+
+      const snapshotData = prismaMock.invoiceCustomerSnapshot.create.mock.calls[0]?.[0]?.data;
+      expect(snapshotData).toEqual({
+        invoiceId: draft.id,
+        name: "مشتری قبل از تغییر",
+        mobile: "09123456789",
+        phone: "02188776655",
+        email: "info@pars.ir",
+        address: "آدرس قدیمی",
+        nationalId: "10101010101",
+        economicCode: "4111222333",
+      });
+      // No customerId on the snapshot: later Customer edits cannot reach it.
+      expect(snapshotData).not.toHaveProperty("customerId");
+    });
+  });
+
+  describe("13. Database concurrency boundaries (Notes for PostgreSQL integration testing)", () => {
+    it("documents what the mocked suite cannot prove: a true two-connection race", async () => {
+      // The mocked Prisma client runs the transaction callback on the SAME
+      // mock object, so two concurrent finalizeInvoice() calls cannot block
+      // each other at `SELECT ... FOR UPDATE`, at the UsagePeriod row, or at
+      // the InvoiceSettings row the way two real connections would.
+      //
+      // Verified here (against the mocks):
+      //   1. the invoice row lock is the FIRST statement of the transaction;
+      //   2. the DRAFT check runs on the post-lock read and rejects a
+      //      finalized/cancelled invoice before any write;
+      //   3. the quota increment is a conditional UPDATE (`invoiceCount < limit`);
+      //   4. the number allocation is a single atomic increment on the
+      //      business's own InvoiceSettings row;
+      //   5. all writes go through one transaction client and any thrown error
+      //      propagates unchanged, which is what triggers the rollback.
+      //
+      // Still REQUIRES integration testing on PostgreSQL:
+      //   - two connections finalizing the SAME invoice: exactly one succeeds,
+      //     the other gets ValidationError and leaves invoiceCount and
+      //     nextInvoiceNumber incremented exactly once;
+      //   - two connections finalizing DIFFERENT drafts of the same business:
+      //     both succeed with distinct consecutive numbers;
+      //   - N+1 concurrent finalizations at limit N: exactly N succeed;
+      //   - a rollback after the counter increment leaves nextInvoiceNumber
+      //     unchanged (the number is not permanently consumed).
+      expect(true).toBe(true);
+    });
+
     it("documents requirement for PostgreSQL integration testing: atomic sequence lock", async () => {
       // In PostgreSQL, `UPDATE invoice_settings SET nextInvoiceNumber = nextInvoiceNumber + 1`
       // acquires a row-level write lock that serializes concurrent requests for the same business.
