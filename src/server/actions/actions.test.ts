@@ -530,6 +530,92 @@ describe("invoice actions", () => {
     });
   });
 
+  it("maps an unknown invoice to NOT_FOUND during finalization", async () => {
+    const { NotFoundError } = await import("@/server/auth/requireSession");
+    const { finalizeInvoice } = await import("./invoiceActions");
+    invoiceSvc.finalizeInvoice.mockRejectedValue(new NotFoundError("Invoice not found"));
+
+    const result = await finalizeInvoice("inv-missing");
+
+    expect(result).toEqual({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Invoice not found" },
+    });
+  });
+
+  it("maps already-finalized, archived-business and concurrency lifecycle rejections to VALIDATION_ERROR", async () => {
+    const { ValidationError } = await import("@/server/errors");
+    const { finalizeInvoice } = await import("./invoiceActions");
+
+    const scenarios = [
+      {
+        message: "Only draft invoices can be finalized; this invoice is already finalized",
+        expected: "Only draft invoices can be finalized; this invoice is already finalized",
+      },
+      {
+        message: "Cannot finalize invoice for an archived business",
+        expected: "Cannot finalize invoice for an archived business",
+      },
+      {
+        message: "Invoice is no longer in draft status and cannot be finalized",
+        expected: "Invoice is no longer in draft status and cannot be finalized",
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      invoiceSvc.finalizeInvoice.mockRejectedValueOnce(new ValidationError(scenario.message));
+      const result = await finalizeInvoice("inv-1");
+      expect(result).toEqual({
+        success: false,
+        error: { code: "VALIDATION_ERROR", message: scenario.expected },
+      });
+    }
+  });
+
+  it("rejects unauthenticated finalization before touching the service", async () => {
+    const { UnauthorizedError } = await import("@/server/auth/requireSession");
+    const { finalizeInvoice } = await import("./invoiceActions");
+    requireSession.mockRejectedValue(new UnauthorizedError());
+
+    const result = await finalizeInvoice("inv-1");
+
+    expect(result).toEqual({ success: false, error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
+    expect(invoiceSvc.finalizeInvoice).not.toHaveBeenCalled();
+  });
+
+  it("does not duplicate finalization logic; it delegates every attempt to the service", async () => {
+    const { ValidationError } = await import("@/server/errors");
+    const { finalizeInvoice } = await import("./invoiceActions");
+
+    invoiceSvc.finalizeInvoice
+      .mockResolvedValueOnce(
+        invoiceRecord({
+          invoiceNumber: "101",
+          status: "PENDING_PAYMENT",
+          finalizedAt: new Date("2026-03-05T10:00:00.000Z"),
+        }),
+      )
+      .mockRejectedValueOnce(
+        new ValidationError("Only draft invoices can be finalized; this invoice is already finalized"),
+      );
+
+    const first = await finalizeInvoice("inv-1");
+    expect(first.success).toBe(true);
+
+    const second = await finalizeInvoice("inv-1");
+    expect(second).toEqual({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "Only draft invoices can be finalized; this invoice is already finalized",
+      },
+    });
+
+    expect(invoiceSvc.finalizeInvoice).toHaveBeenCalledTimes(2);
+    expect(invoiceSvc.finalizeInvoice).toHaveBeenNthCalledWith(1, "inv-1");
+    expect(invoiceSvc.finalizeInvoice).toHaveBeenNthCalledWith(2, "inv-1");
+  });
+
   it("lists invoices and forwards the status/limit filter", async () => {
     const { listInvoices } = await import("./invoiceActions");
     invoiceSvc.listInvoices.mockResolvedValue([invoiceRecord()]);
