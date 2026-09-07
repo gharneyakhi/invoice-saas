@@ -205,6 +205,34 @@ const FINALIZED_STATUSES: InvoiceRecord["status"][] = [
   "OVERDUE",
 ];
 
+/**
+ * Turns the inclusive "issued up to" day the user picked into an *exclusive*
+ * upper bound one day later.
+ *
+ * `issueDate` is a timestamp, not a date: invoices created without an explicit
+ * issue date are stored with the full current time (`new Date()`), while the
+ * editor's `YYYY-MM-DD` input parses to midnight UTC. A naive `lte: 2026-03-01`
+ * would therefore silently exclude every invoice issued *during* 2026-03-01.
+ * Comparing `< 2026-03-02T00:00Z` keeps the filter inclusive of the whole day,
+ * matching the UTC day boundary the write path already uses.
+ *
+ * A bound that already carries a time component (an explicit ISO timestamp) is
+ * left exactly as given.
+ */
+function exclusiveUpperBound(issuedTo: Date): Date {
+  const isMidnightUtc =
+    issuedTo.getUTCHours() === 0 &&
+    issuedTo.getUTCMinutes() === 0 &&
+    issuedTo.getUTCSeconds() === 0 &&
+    issuedTo.getUTCMilliseconds() === 0;
+
+  if (!isMidnightUtc) return issuedTo;
+
+  const next = new Date(issuedTo.getTime());
+  next.setUTCDate(next.getUTCDate() + 1);
+  return next;
+}
+
 function lifecycleWhere(lifecycle: InvoiceLifecycleFilter | undefined) {
   switch (lifecycle) {
     case "DRAFT":
@@ -277,7 +305,7 @@ export async function queryInvoices(
   if (options.issuedFrom || options.issuedTo) {
     where.issueDate = {
       ...(options.issuedFrom ? { gte: options.issuedFrom } : {}),
-      ...(options.issuedTo ? { lte: options.issuedTo } : {}),
+      ...(options.issuedTo ? { lt: exclusiveUpperBound(options.issuedTo) } : {}),
     };
   }
 

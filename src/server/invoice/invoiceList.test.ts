@@ -127,6 +127,33 @@ describe("queryInvoices", () => {
     expect(or[2]).toEqual({ customer: { is: { name: { contains: "آلفا", mode: "insensitive" } } } });
   });
 
+  it("treats the issue-date upper bound as inclusive of the whole day", async () => {
+    const { queryInvoices } = await import("./invoiceService");
+
+    await queryInvoices("biz-1", {
+      issuedFrom: new Date("2026-03-01T00:00:00.000Z"),
+      issuedTo: new Date("2026-03-01T00:00:00.000Z"),
+    });
+
+    // `issueDate` is a timestamp: an invoice issued at 14:30 on 2026-03-01 must
+    // still match a "to 2026-03-01" filter, so the upper bound is exclusive of
+    // the *next* midnight rather than `lte` midnight of the selected day.
+    expect(prismaMock.invoice.findMany.mock.calls[0]![0]!.where.issueDate).toEqual({
+      gte: new Date("2026-03-01T00:00:00.000Z"),
+      lt: new Date("2026-03-02T00:00:00.000Z"),
+    });
+  });
+
+  it("leaves an explicit timestamp upper bound untouched", async () => {
+    const { queryInvoices } = await import("./invoiceService");
+
+    await queryInvoices("biz-1", { issuedTo: new Date("2026-03-01T09:15:00.000Z") });
+
+    expect(prismaMock.invoice.findMany.mock.calls[0]![0]!.where.issueDate).toEqual({
+      lt: new Date("2026-03-01T09:15:00.000Z"),
+    });
+  });
+
   it("maps the FINALIZED lifecycle group onto the finalized statuses", async () => {
     const { queryInvoices } = await import("./invoiceService");
 
