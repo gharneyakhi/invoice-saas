@@ -15,7 +15,18 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
-import { AlertCircleIcon, ChevronRightIcon, FileTextIcon } from "@/components/icons";
+import { FinalizeInvoiceButton } from "@/components/invoice/FinalizeInvoiceButton";
+import {
+  AlertCircleIcon,
+  CheckCircleIcon,
+  ChevronRightIcon,
+  FileTextIcon,
+} from "@/components/icons";
+import {
+  canFinalizeInvoice,
+  isCancelledInvoice,
+  isFinalizedInvoice,
+} from "@/lib/finalization";
 import {
   formatCurrency,
   formatInvoiceStatus,
@@ -111,7 +122,14 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
     throw error;
   }
 
+  const invoiceLifecycle = {
+    status: record.status,
+    finalizedAt: record.finalizedAt,
+  };
   const isDraft = record.status === "DRAFT";
+  const canFinalize = canFinalizeInvoice(invoiceLifecycle);
+  const isFinalized = isFinalizedInvoice(invoiceLifecycle);
+  const isCancelled = isCancelledInvoice(invoiceLifecycle);
 
   // For DRAFT invoices: resolve current BusinessProfile and live customer.
   let profile: {
@@ -181,8 +199,8 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
           </Badge>
         }
         actions={
-          <div className="flex gap-2">
-            <BackButton />
+          <div className="flex flex-wrap items-center gap-2">
+            {canFinalize && <FinalizeInvoiceButton invoiceId={record.id} />}
             {isDraft && (
               <Link href={`/dashboard/invoices/new?invoiceId=${encodeURIComponent(record.id)}`}>
                 <Button size="sm" className="gap-1.5 shadow-sm">
@@ -190,9 +208,27 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
                 </Button>
               </Link>
             )}
+            <BackButton />
           </div>
         }
       />
+
+      {isFinalized && (
+        <div className="flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs leading-relaxed text-emerald-800">
+          <CheckCircleIcon size={18} className="shrink-0" />
+          <div className="space-y-0.5">
+            <p className="font-semibold">فاکتور نهایی شده است</p>
+            <p>
+              این فاکتور فقط‌خواندنی است و قابل ویرایش نیست.
+              {isCancelled ? (
+                <span> این فاکتور لغو شده است.</span>
+              ) : (
+                <span> شماره رسمی: {toPersianDigits(invoice.invoiceNumber)}</span>
+              )}
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
@@ -202,7 +238,10 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
               <CardTitle className="text-sm">اطلاعات فاکتور</CardTitle>
             </CardHeader>
             <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-              <Field label="شماره فاکتور" value={toPersianDigits(invoice.invoiceNumber)} />
+              <Field
+                label={isFinalized ? "شماره فاکتور رسمی" : "شماره فاکتور"}
+                value={toPersianDigits(invoice.invoiceNumber)}
+              />
               <Field label="نوع" value={formatInvoiceType(invoice.invoiceType)} />
               <Field label="وضعیت" value={isDraft ? "پیش‌نویس" : statusMeta.label} />
               <Field label="تاریخ صدور" value={formatPersianDate(invoice.issueDate)} />
@@ -211,6 +250,10 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
                 value={invoice.dueDate ? formatPersianDate(invoice.dueDate) : "—"}
               />
               <Field label="مشتری" value={customerName ?? "—"} />
+              <Field
+                label="تاریخ نهایی‌سازی"
+                value={invoice.finalizedAt ? formatPersianDate(invoice.finalizedAt) : "—"}
+              />
             </CardContent>
           </Card>
 
