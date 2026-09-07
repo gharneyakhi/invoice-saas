@@ -7,6 +7,7 @@ import {
   type InvoiceCalculationInput,
 } from "@/lib/invoice-calculation";
 import { requireSession, ForbiddenError, NotFoundError } from "@/server/auth/requireSession";
+import { requireBusinessOwnership } from "@/server/auth/requireBusinessOwnership";
 import { InvoiceLimitReachedError, ValidationError } from "@/server/errors";
 import { resolveEntitlements } from "@/server/entitlements/entitlementService";
 import { ensureCurrentUsagePeriod } from "@/server/entitlements/usagePeriodService";
@@ -115,6 +116,101 @@ export interface InvoiceRecord {
   items?: InvoiceItemRecord[];
   sellerSnapshot?: InvoiceSellerSnapshotRecord | null;
   customerSnapshot?: InvoiceCustomerSnapshotRecord | null;
+}
+
+/**
+ * Stable, meaningful order for invoice lists: newest created first, with `id`
+ * as a final tie-breaker so two invoices created in the same millisecond never
+ * swap places between requests (deterministic ordering for UI lists).
+ */
+export const INVOICE_LIST_ORDER_BY = [
+  { createdAt: "desc" as const },
+  { id: "asc" as const },
+];
+
+export interface ListInvoicesOptions {
+  /**
+   * Optional status filter (e.g. `DRAFT` to list drafts, `PAID` for settled
+   * invoices). When omitted every invoice of the business is returned.
+   */
+  status?: InvoiceRecord["status"];
+  /**
+   * Hard cap on rows returned (never more than this default of 200), so an
+   * invoice list can never become an unbounded `SELECT *`.
+   */
+  limit?: number;
+}
+
+function assertInvoiceId(invoiceId: unknown): string {
+  if (typeof invoiceId !== "string" || invoiceId.trim() === "") {
+    throw new ValidationError("Invoice ID is required");
+  }
+  return invoiceId;
+}
+
+/**
+ * Lists the invoices of a business the caller owns, newest first.
+ *
+ * Ownership is proven by `requireBusinessOwnership(businessId)` — the invoice
+ * query is scoped to the verified Business row's `id`, so a caller can never
+ * read another account's invoices by supplying a foreign `businessId`.
+ *
+ * Deliberately narrow: no `items`, snapshots or payments are loaded, and the
+ * result is capped by `ListInvoicesOptions.limit` (default 200). A dashboard /
+ * list view rarely needs full line items; callers that do should use
+ * `getInvoice` for a single row.
+ */
+export async function listInvoices(
+  businessId: string,
+  options: ListInvoicesOptions = {},
+): Promise<InvoiceRecord[]> {
+  const owned = await requireBusinessOwnership(businessId);
+  const limit = options.limit === undefined ? 200 : Math.max(1, Math.min(options.limit, 200));
+
+  return (await prisma.invoice.findMany({
+    where: {
+      businessId: owned.id, // the verified row's id, never the raw client value
+      ...(options.status ? { status: options.status } : {}),
+    },
+    orderBy: INVOICE_LIST_ORDER_BY,
+    take: limit,
+  })) as unknown as InvoiceRecord[];
+}
+
+/**
+ * Returns a single invoice of a business the caller owns, together with its
+ * line items and immutable snapshots (enough to render a full invoice view).
+ *
+ * Distinct errors, matching the rest of the domain layer: a missing invoice →
+ * `NotFoundError`; a row that exists but belongs to a different Business (e.g.
+ * another account's) → `ForbiddenError`. Reads stay available for cancelled
+ * invoices and archived businesses so history remains viewable.
+ */
+export async function getInvoice(
+  businessId: string,
+  invoiceId: unknown,
+): Promise<InvoiceRecord> {
+  const owned = await requireBusinessOwnership(businessId);
+  const id = assertInvoiceId(invoiceId);
+
+  const invoice = await prisma.invoice.findUnique({
+    where: { id },
+    include: {
+      items: { orderBy: { sortOrder: "asc" } },
+      sellerSnapshot: true,
+      customerSnapshot: true,
+    },
+  });
+
+  if (!invoice) {
+    throw new NotFoundError("Invoice not found");
+  }
+
+  if (invoice.businessId !== owned.id) {
+    throw new ForbiddenError("Invoice does not belong to this business");
+  }
+
+  return invoice as unknown as InvoiceRecord;
 }
 
 /**
