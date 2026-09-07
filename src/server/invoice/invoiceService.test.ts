@@ -31,6 +31,7 @@ const prismaMock = vi.hoisted(() => ({
     create: vi.fn(),
     createMany: vi.fn(),
     update: vi.fn(),
+    deleteMany: vi.fn(),
   },
   usagePeriod: {
     findUnique: vi.fn(),
@@ -1723,6 +1724,388 @@ describe("finalizeInvoice", () => {
       // guarantees that concurrent requests cannot exceed the plan limit.
       // Verified structurally via updateMany returning count: 0 when limit is reached.
       expect(true).toBe(true);
+    });
+  });
+});
+
+describe("updateDraftInvoice", () => {
+  const UPDATE_PAYLOAD = {
+    customerId: "cust-1",
+    invoiceType: "PROFORMA" as const,
+    issueDate: "2026-03-16T00:00:00.000Z",
+    dueDate: "2026-04-01T00:00:00.000Z",
+    globalDiscountPercent: 5,
+    taxPercent: 9,
+    notes: "ویرایش پیش‌نویس",
+    items: [
+      {
+        productId: "prod-1",
+        title: "خدمات طراحی وب",
+        unitPrice: 100000,
+        quantity: 2,
+        discountPercent: 10,
+        unit: "ساعت",
+      },
+      {
+        title: "پشتیبانی فنی",
+        unitPrice: 50000,
+        quantity: 1,
+        discountPercent: 0,
+      },
+    ],
+  };
+
+  /** Arms the read/write mocks with the standard draft-owned world. */
+  function armDraftUpdateMocks(invoiceOverrides: Record<string, unknown> = {}) {
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+    prismaMock.customer.findUnique.mockResolvedValue(customerRow());
+    prismaMock.product.findMany.mockResolvedValue([productRow()]);
+    prismaMock.invoiceSettings.findUnique.mockResolvedValue(invoiceSettingsRow());
+    prismaMock.invoice.findUnique.mockResolvedValue(draftInvoiceRow(invoiceOverrides));
+    prismaMock.invoiceItem.deleteMany.mockResolvedValue({ count: 2 });
+    prismaMock.invoice.update.mockImplementation(async ({ data }) => ({
+      ...draftInvoiceRow(invoiceOverrides),
+      ...data,
+      id: "inv-draft-1",
+      items: (data.items?.create ?? []).map((item: Record<string, unknown>, idx: number) => ({
+        id: `item-${idx + 1}`,
+        invoiceId: "inv-draft-1",
+        ...item,
+      })),
+    }));
+  }
+
+  describe("1. Successful draft update", () => {
+    it("replaces the draft content and recalculates all totals server-side", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+
+      const result = await updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD);
+
+      expect(requireSession).toHaveBeenCalledTimes(1);
+      // Invoice row is locked before any read/write (finalize serialization).
+      expect(prismaMock.$queryRaw).toHaveBeenCalledWith(expect.anything(), "inv-draft-1");
+      expect(prismaMock.business.findUnique).toHaveBeenCalledWith({ where: { id: "biz-1" } });
+      expect(prismaMock.invoice.findUnique).toHaveBeenCalledWith({ where: { id: "inv-draft-1" } });
+
+      // Old line items are fully replaced by the new, recalculated set.
+      expect(prismaMock.invoiceItem.deleteMany).toHaveBeenCalledWith({
+        where: { invoiceId: "inv-draft-1" },
+      });
+
+      expect(prismaMock.invoice.update).toHaveBeenCalledTimes(1);
+      const updateCall = prismaMock.invoice.update.mock.calls[0]?.[0];
+      expect(updateCall.where).toEqual({ id: "inv-draft-1" });
+
+      // Editable fields are written.
+      expect(updateCall.data.customerId).toBe("cust-1");
+      expect(updateCall.data.invoiceType).toBe("PROFORMA");
+      expect(updateCall.data.issueDate).toEqual(new Date("2026-03-16T00:00:00.000Z"));
+      expect(updateCall.data.dueDate).toEqual(new Date("2026-04-01T00:00:00.000Z"));
+      expect(updateCall.data.notes).toBe("ویرایش پیش‌نویس");
+
+      // Totals are authoritative (same math as create): subtotal 250000,
+      // itemDiscount 20000, global 5% → 11500, taxable 218500, tax 9% → 19665,
+      // total 238165.
+      expect(updateCall.data.subtotal.toString()).toBe("250000");
+      expect(updateCall.data.itemDiscountAmount.toString()).toBe("20000");
+      expect(updateCall.data.globalDiscountPercent.toString()).toBe("5");
+      expect(updateCall.data.globalDiscountAmount.toString()).toBe("11500");
+      expect(updateCall.data.taxPercent.toString()).toBe("9");
+      expect(updateCall.data.taxableAmount.toString()).toBe("218500");
+      expect(updateCall.data.taxAmount.toString()).toBe("19665");
+      expect(updateCall.data.total.toString()).toBe("238165");
+      expect(updateCall.data.remainingAmount.toString()).toBe("238165");
+
+      // Line values come from the engine, never from client input.
+      const createItems = updateCall.data.items.create;
+      expect(createItems).toHaveLength(2);
+      expect(createItems[0].subtotal.toString()).toBe("200000");
+      expect(createItems[0].discountAmount.toString()).toBe("20000");
+      expect(createItems[0].total.toString()).toBe("180000");
+      expect(createItems[0].sortOrder).toBe(0);
+      expect(createItems[1].sortOrder).toBe(1);
+
+      // Returned record is the re-read invoice with replaced items.
+      expect(result.id).toBe("inv-draft-1");
+      expect(result.items).toHaveLength(2);
+    });
+
+    it("preserves invoiceNumber, status, paidAmount and lifecycle timestamps", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+
+      await updateDraftInvoice("biz-1", "inv-draft-1", {
+        items: [{ title: "خدمت", unitPrice: 1000, quantity: 1 }],
+      });
+
+      const updateCall = prismaMock.invoice.update.mock.calls[0]?.[0];
+      expect(updateCall.data).not.toHaveProperty("invoiceNumber");
+      expect(updateCall.data).not.toHaveProperty("status");
+      expect(updateCall.data).not.toHaveProperty("paidAmount");
+      expect(updateCall.data).not.toHaveProperty("finalizedAt");
+      expect(updateCall.data).not.toHaveProperty("cancelledAt");
+    });
+
+    it("re-derives remainingAmount from the new total and the preserved paidAmount", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks({ paidAmount: new Decimal("50000") });
+
+      await updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD);
+
+      const updateCall = prismaMock.invoice.update.mock.calls[0]?.[0];
+      expect(updateCall.data.remainingAmount.toString()).toBe("188165");
+    });
+
+    it("falls back to InvoiceSettings.defaultVatPercent when taxPercent is omitted", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+
+      const payload = { ...UPDATE_PAYLOAD } as Record<string, unknown>;
+      delete payload.taxPercent;
+
+      await updateDraftInvoice("biz-1", "inv-draft-1", payload);
+
+      expect(prismaMock.invoiceSettings.findUnique).toHaveBeenCalledWith({
+        where: { businessId: "biz-1" },
+      });
+      const updateCall = prismaMock.invoice.update.mock.calls[0]?.[0];
+      expect(updateCall.data.taxPercent.toString()).toBe("10");
+    });
+  });
+
+  describe("2. Finalization / quota / numbering invariants", () => {
+    it("never touches quota, official numbering or snapshots", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+
+      await updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD);
+
+      expect(prismaMock.invoiceSettings.update).not.toHaveBeenCalled();
+      expect(prismaMock.usagePeriod.updateMany).not.toHaveBeenCalled();
+      expect(prismaMock.usagePeriod.update).not.toHaveBeenCalled();
+      expect(prismaMock.invoiceSellerSnapshot.create).not.toHaveBeenCalled();
+      expect(prismaMock.invoiceCustomerSnapshot.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("3. Authentication & authorization", () => {
+    it("rejects with UnauthorizedError before doing any work when there is no session", async () => {
+      const { UnauthorizedError } = await import("@/server/auth/requireSession");
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      requireSession.mockRejectedValue(new UnauthorizedError());
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD),
+      ).rejects.toBeInstanceOf(UnauthorizedError);
+
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects with ForbiddenError when the business belongs to another account", async () => {
+      const { ForbiddenError } = await import("@/server/auth/requireSession");
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+      prismaMock.business.findUnique.mockResolvedValue(businessRow({ accountId: "acc-other" }));
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD),
+      ).rejects.toBeInstanceOf(ForbiddenError);
+
+      expect(prismaMock.invoice.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("4. Business & invoice state", () => {
+    it("rejects editing for an archived business", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+      prismaMock.business.findUnique.mockResolvedValue(
+        businessRow({ archivedAt: new Date("2026-02-01T00:00:00.000Z") }),
+      );
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD),
+      ).rejects.toThrow("Cannot edit an invoice of an archived business");
+    });
+
+    it("rejects with NotFoundError when the invoice does not exist", async () => {
+      const { NotFoundError } = await import("@/server/auth/requireSession");
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+      prismaMock.invoice.findUnique.mockResolvedValue(null);
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-missing", UPDATE_PAYLOAD),
+      ).rejects.toBeInstanceOf(NotFoundError);
+    });
+
+    it("rejects with ForbiddenError when the invoice belongs to a different business", async () => {
+      const { ForbiddenError } = await import("@/server/auth/requireSession");
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+      prismaMock.invoice.findUnique.mockResolvedValue(draftInvoiceRow({ businessId: "biz-other" }));
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD),
+      ).rejects.toBeInstanceOf(ForbiddenError);
+
+      expect(prismaMock.invoice.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("5. Lifecycle — only drafts are editable", () => {
+    it("rejects a finalized invoice", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks({ status: "ISSUED", finalizedAt: new Date("2026-03-20T00:00:00.000Z") });
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD),
+      ).rejects.toThrow("Only draft invoices can be edited; this invoice is already finalized");
+
+      expect(prismaMock.invoice.update).not.toHaveBeenCalled();
+    });
+
+    it("rejects a cancelled invoice with a distinct message", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks({ status: "CANCELLED", cancelledAt: new Date("2026-03-20T00:00:00.000Z") });
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD),
+      ).rejects.toThrow("Cancelled invoices cannot be edited");
+
+      expect(prismaMock.invoice.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("6. Cross-business references", () => {
+    it("rejects a customer that belongs to another business", async () => {
+      const { ForbiddenError } = await import("@/server/auth/requireSession");
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+      prismaMock.customer.findUnique.mockResolvedValue(customerRow({ businessId: "biz-other" }));
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD),
+      ).rejects.toBeInstanceOf(ForbiddenError);
+    });
+
+    it("rejects an archived customer reference", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+      prismaMock.customer.findUnique.mockResolvedValue(
+        customerRow({ archivedAt: new Date("2026-02-01T00:00:00.000Z") }),
+      );
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD),
+      ).rejects.toThrow("Cannot reference an archived customer");
+    });
+
+    it("rejects a product that belongs to another business", async () => {
+      const { ForbiddenError } = await import("@/server/auth/requireSession");
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+      prismaMock.product.findMany.mockResolvedValue([productRow({ businessId: "biz-other" })]);
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD),
+      ).rejects.toBeInstanceOf(ForbiddenError);
+    });
+
+    it("rejects when a referenced product does not exist", async () => {
+      const { NotFoundError } = await import("@/server/auth/requireSession");
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+      prismaMock.product.findMany.mockResolvedValue([]);
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD),
+      ).rejects.toBeInstanceOf(NotFoundError);
+    });
+  });
+
+  describe("7. Input validation", () => {
+    it("rejects an empty items array before starting the transaction", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", { items: [] }),
+      ).rejects.toThrow("Invoice must have at least one item");
+
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects server-owned fields (strict schema) before starting the transaction", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", {
+          total: 123456,
+          status: "PAID",
+          invoiceNumber: "INV-1",
+          items: [{ title: "خدمت", unitPrice: 1000, quantity: 1 }],
+        }),
+      ).rejects.toBeInstanceOf(ValidationError);
+
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects a discount percent above 100", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", {
+          items: [{ title: "خدمت", unitPrice: 1000, quantity: 1, discountPercent: 150 }],
+        }),
+      ).rejects.toBeInstanceOf(ValidationError);
+    });
+  });
+
+  describe("8. Atomic transaction behavior", () => {
+    it("runs everything through a single transaction client", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+
+      await updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD);
+
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      // The same (transactional) mock client received every write.
+      expect(prismaMock.invoiceItem.deleteMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.invoice.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("propagates a write failure so the interactive transaction rolls back", async () => {
+      const { updateDraftInvoice } = await import("./invoiceService");
+
+      armDraftUpdateMocks();
+      const dbError = new Error("database connection lost");
+      prismaMock.invoice.update.mockRejectedValue(dbError);
+      // The transaction callback throws -> $transaction propagates it.
+      prismaMock.$transaction.mockImplementation(async (callback: (tx: unknown) => unknown) =>
+        callback(prismaMock),
+      );
+
+      await expect(
+        updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD),
+      ).rejects.toThrow("database connection lost");
     });
   });
 });

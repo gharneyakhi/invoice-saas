@@ -163,6 +163,26 @@ export const createDraftInvoiceSchema = z
 
 export type CreateDraftInvoiceInput = z.infer<typeof createDraftInvoiceSchema>;
 
+/**
+ * Contract for editing an existing DRAFT invoice. Identical editable surface
+ * to `createDraftInvoiceSchema` (still `.strict()`, so server-owned fields
+ * such as `status`, `invoiceNumber`, `subtotal`, `total`, `paidAmount`,
+ * `remainingAmount` or `finalizedAt` are rejected), plus the invoice the edit
+ * targets. The lifecycle rule ("only DRAFT rows may be edited") is enforced
+ * by `invoiceService.updateDraftInvoice`, not here.
+ */
+export const updateDraftInvoiceSchema = createDraftInvoiceSchema.extend({
+  invoiceId: z
+    .string({
+      required_error: "invoiceId is required",
+      invalid_type_error: "invoiceId must be a string",
+    })
+    .trim()
+    .min(1, "invoiceId is required"),
+});
+
+export type UpdateDraftInvoiceInput = z.infer<typeof updateDraftInvoiceSchema>;
+
 /** `"title: Item title is required; items.0.quantity: quantity must be greater than zero"` — field-scoped formatting. */
 export function formatZodIssues(error: z.ZodError): string {
   return error.issues
@@ -176,6 +196,14 @@ export function parseCreateDraftInvoiceInput(input: unknown): CreateDraftInvoice
   const result = createDraftInvoiceSchema.safeParse(input);
   if (!result.success) {
     throw new ValidationError(`Invalid draft invoice input — ${formatZodIssues(result.error)}`);
+  }
+  return result.data;
+}
+
+export function parseUpdateDraftInvoiceInput(input: unknown): UpdateDraftInvoiceInput {
+  const result = updateDraftInvoiceSchema.safeParse(input);
+  if (!result.success) {
+    throw new ValidationError(`Invalid draft invoice update input — ${formatZodIssues(result.error)}`);
   }
   return result.data;
 }

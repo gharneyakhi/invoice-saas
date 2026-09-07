@@ -8,6 +8,9 @@ import {
   formatInvoiceStatus,
   formatInvoiceType,
   formatPlanKey,
+  normalizeLocalizedNumber,
+  toNumericInputString,
+  formatGregorianDateInput,
 } from "./formatters";
 
 describe("formatters", () => {
@@ -105,5 +108,87 @@ describe("formatters", () => {
       expect(formatPlanKey("PRO")).toBe("پلن حرفه‌ای");
       expect(formatPlanKey("ENTERPRISE")).toBe("پلن ENTERPRISE");
     });
+  });
+});
+
+describe("normalizeLocalizedNumber", () => {
+  it("converts Persian digits to ASCII", () => {
+    expect(normalizeLocalizedNumber("۱۲۳۴۵۶۷۸۹۰")).toBe("1234567890");
+    expect(normalizeLocalizedNumber("۲,۵۰۰,۰۰۰")).toBe("2500000");
+  });
+
+  it("converts Arabic-Indic digits to ASCII", () => {
+    expect(normalizeLocalizedNumber("٠١٢٣")).toBe("0123");
+  });
+
+  it("normalizes Persian decimal separators", () => {
+    expect(normalizeLocalizedNumber("۱۲۳٫۵")).toBe("123.5");
+    expect(normalizeLocalizedNumber("۱۲۳/۵")).toBe("123.5");
+  });
+
+  it("strips thousands separators and whitespace", () => {
+    expect(normalizeLocalizedNumber("1,234,567")).toBe("1234567");
+    expect(normalizeLocalizedNumber("۱٬۲۳۴")).toBe("1234");
+    expect(normalizeLocalizedNumber(" 123 ")).toBe("123");
+  });
+
+  it("passes plain ASCII decimals through unchanged", () => {
+    expect(normalizeLocalizedNumber("12345.67")).toBe("12345.67");
+    expect(normalizeLocalizedNumber(42)).toBe("42");
+  });
+
+  it("rejects non-numeric and negative input with empty string", () => {
+    expect(normalizeLocalizedNumber("abc")).toBe("");
+    expect(normalizeLocalizedNumber("-100")).toBe("");
+    expect(normalizeLocalizedNumber("۱۲a۳")).toBe("");
+    expect(normalizeLocalizedNumber("")).toBe("");
+    expect(normalizeLocalizedNumber(null)).toBe("");
+    expect(normalizeLocalizedNumber(undefined)).toBe("");
+  });
+});
+
+describe("toNumericInputString", () => {
+  it("trims trailing decimal zeros for form inputs", () => {
+    expect(toNumericInputString("5000000.00")).toBe("5000000");
+    expect(toNumericInputString("9.00")).toBe("9");
+    expect(toNumericInputString("2.50")).toBe("2.5");
+    expect(toNumericInputString("0.50")).toBe("0.5");
+  });
+
+  it("keeps plain integers and zero intact", () => {
+    expect(toNumericInputString("2.5")).toBe("2.5");
+    expect(toNumericInputString("100")).toBe("100");
+    expect(toNumericInputString("0")).toBe("0");
+    expect(toNumericInputString(10)).toBe("10");
+  });
+
+  it("returns empty string for non-numeric input", () => {
+    expect(toNumericInputString(null)).toBe("");
+    expect(toNumericInputString("abc")).toBe("");
+  });
+});
+
+describe("formatGregorianDateInput", () => {
+  it("formats a Date as YYYY-MM-DD in the given time zone", () => {
+    // 2026-09-07 00:30 UTC is 04:00 in Asia/Tehran — still day 7 there.
+    expect(formatGregorianDateInput(new Date("2026-09-07T00:30:00.000Z"), "Asia/Tehran")).toBe(
+      "2026-09-07",
+    );
+  });
+
+  it("respects time zone day boundaries", () => {
+    // 2026-09-06 21:00 UTC is 2026-09-07 00:30 in Asia/Tehran.
+    expect(formatGregorianDateInput(new Date("2026-09-06T21:00:00.000Z"), "Asia/Tehran")).toBe(
+      "2026-09-07",
+    );
+    // ...but still 2026-09-06 in UTC.
+    expect(formatGregorianDateInput(new Date("2026-09-06T21:00:00.000Z"), "UTC")).toBe(
+      "2026-09-06",
+    );
+  });
+
+  it("accepts ISO strings and returns empty for invalid input", () => {
+    expect(formatGregorianDateInput("2026-03-15T12:00:00.000Z", "UTC")).toBe("2026-03-15");
+    expect(formatGregorianDateInput("not-a-date")).toBe("");
   });
 });

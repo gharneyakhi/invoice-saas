@@ -3,6 +3,7 @@ import Decimal from "decimal.js";
 import { prisma } from "@/lib/prisma";
 import {
   calculateInvoice,
+  calculateRemainingAmount,
   derivePaymentStatus,
   type InvoiceCalculationInput,
 } from "@/lib/invoice-calculation";
@@ -15,6 +16,7 @@ import {
   formatOfficialInvoiceNumber,
   generateDraftInvoiceNumber,
   parseCreateDraftInvoiceInput,
+  parseUpdateDraftInvoiceInput,
   type CreateDraftInvoiceInput,
 } from "@/server/invoice/schema";
 
@@ -146,6 +148,97 @@ function assertInvoiceId(invoiceId: unknown): string {
     throw new ValidationError("Invoice ID is required");
   }
   return invoiceId;
+}
+
+// ---------------------------------------------------------------------------
+// Shared draft-reference guards (used by both createDraftInvoice and
+// updateDraftInvoice — the two paths must apply exactly the same
+// cross-business / archive rules so a draft can never be created *or* edited
+// into referencing another account's rows).
+// ---------------------------------------------------------------------------
+
+/**
+ * Verifies that a referenced customer exists, belongs to the exact same
+ * business and is not archived. Distinct errors match the rest of the domain
+ * layer: missing → NotFoundError, foreign business → ForbiddenError,
+ * archived → ValidationError.
+ */
+async function assertCustomerReference(
+  tx: Prisma.TransactionClient,
+  businessId: string,
+  customerId: string,
+): Promise<void> {
+  const customer = await tx.customer.findUnique({
+    where: { id: customerId },
+  });
+
+  if (!customer) {
+    throw new NotFoundError("Customer not found");
+  }
+
+  if (customer.businessId !== businessId) {
+    throw new ForbiddenError("Customer does not belong to this business");
+  }
+
+  if (customer.archivedAt !== null) {
+    throw new ValidationError("Cannot reference an archived customer");
+  }
+}
+
+/**
+ * Verifies that every referenced product exists, belongs to the exact same
+ * business and is not archived. Unique-de-duplicates ids before querying.
+ */
+async function assertProductReferences(
+  tx: Prisma.TransactionClient,
+  businessId: string,
+  items: readonly { productId?: string | null }[],
+): Promise<void> {
+  const productIds = Array.from(
+    new Set(items.map((item) => item.productId).filter((id): id is string => Boolean(id))),
+  );
+
+  if (productIds.length === 0) {
+    return;
+  }
+
+  const products = await tx.product.findMany({
+    where: { id: { in: productIds } },
+  });
+
+  if (products.length !== productIds.length) {
+    throw new NotFoundError("One or more referenced products were not found");
+  }
+
+  for (const product of products) {
+    if (product.businessId !== businessId) {
+      throw new ForbiddenError("Product does not belong to this business");
+    }
+    if (product.archivedAt !== null) {
+      throw new ValidationError("Cannot reference an archived product");
+    }
+  }
+}
+
+/**
+ * Resolves the effective VAT rate for a draft: an explicit per-invoice
+ * `taxPercent` wins, otherwise the business `InvoiceSettings.defaultVatPercent`,
+ * otherwise 0. Never trusts a client-supplied tax *amount*.
+ */
+async function resolveDraftTaxPercent(
+  tx: Prisma.TransactionClient,
+  businessId: string,
+  explicitTaxPercent: Decimal.Value | undefined,
+): Promise<Decimal.Value> {
+  if (explicitTaxPercent !== undefined) {
+    return explicitTaxPercent;
+  }
+
+  const settings = await tx.invoiceSettings.findUnique({
+    where: { businessId },
+  });
+
+  return settings?.defaultVatPercent ?? 0;
 }
 
 /**
@@ -280,57 +373,14 @@ export async function createDraftInvoice(
 
     // 2. Verify customer (if provided)
     if (data.customerId) {
-      const customer = await tx.customer.findUnique({
-        where: { id: data.customerId },
-      });
-
-      if (!customer) {
-        throw new NotFoundError("Customer not found");
-      }
-
-      if (customer.businessId !== business.id) {
-        throw new ForbiddenError("Customer does not belong to this business");
-      }
-
-      if (customer.archivedAt !== null) {
-        throw new ValidationError("Cannot reference an archived customer");
-      }
+      await assertCustomerReference(tx, business.id, data.customerId);
     }
 
     // 3. Verify products (if referenced by line items)
-    const productIds = Array.from(
-      new Set(data.items.map((item) => item.productId).filter((id): id is string => Boolean(id))),
-    );
-
-    if (productIds.length > 0) {
-      const products = await tx.product.findMany({
-        where: { id: { in: productIds } },
-      });
-
-      if (products.length !== productIds.length) {
-        throw new NotFoundError("One or more referenced products were not found");
-      }
-
-      for (const product of products) {
-        if (product.businessId !== business.id) {
-          throw new ForbiddenError("Product does not belong to this business");
-        }
-        if (product.archivedAt !== null) {
-          throw new ValidationError("Cannot reference an archived product");
-        }
-      }
-    }
+    await assertProductReferences(tx, business.id, data.items);
 
     // 4. Resolve tax rate (explicit taxPercent > business defaultVatPercent > 0)
-    let taxPercent: Decimal.Value;
-    if (data.taxPercent !== undefined) {
-      taxPercent = data.taxPercent;
-    } else {
-      const settings = await tx.invoiceSettings.findUnique({
-        where: { businessId: business.id },
-      });
-      taxPercent = settings?.defaultVatPercent ?? 0;
-    }
+    const taxPercent = await resolveDraftTaxPercent(tx, business.id, data.taxPercent);
 
     // 5. Authoritative recalculation via pure calculation engine
     const calculationInput: InvoiceCalculationInput = {
@@ -402,6 +452,218 @@ export async function createDraftInvoice(
     });
 
     return invoice as unknown as InvoiceRecord;
+  });
+}
+
+/**
+ * Row shape of a business' invoice settings (defaults applied when drafting).
+ */
+export interface InvoiceSettingsRecord {
+  id: string;
+  businessId: string;
+  invoicePrefix: string | null;
+  nextInvoiceNumber: number;
+  defaultVatPercent: Decimal;
+  currency: string;
+  calendar: "JALALI" | "GREGORIAN";
+  defaultTemplate: string;
+}
+
+/**
+ * Returns the invoice settings of a business the caller owns (or null when the
+ * row is absent), so the invoice editor can pre-fill defaults (VAT percent,
+ * currency). Read-only — it never exposes or mutates `nextInvoiceNumber`
+ * beyond returning the raw row, and official numbering remains owned by
+ * finalization.
+ */
+export async function getInvoiceSettings(businessId: string): Promise<InvoiceSettingsRecord | null> {
+  const owned = await requireBusinessOwnership(businessId);
+
+  const settings = await prisma.invoiceSettings.findUnique({
+    where: { businessId: owned.id },
+  });
+
+  return (settings as unknown as InvoiceSettingsRecord | null) ?? null;
+}
+
+/**
+ * Replaces the editable content of an existing DRAFT invoice.
+ *
+ * Authorization & Business Isolation Rules:
+ *   1. Requires an active authenticated session (`requireSession()`).
+ *   2. Proves the business belongs to the session account, and that the
+ *      invoice belongs to exactly that business. Cross-business / cross-account
+ *      references are rejected (`ForbiddenError`).
+ *   3. Rejects edits when the business is archived.
+ *
+ * Lifecycle Rules (draft editing contract):
+ *   4. ONLY invoices in `DRAFT` status can be edited. Finalized (issued /
+ *      sent / paid / overdue) invoices and cancelled invoices are rejected
+ *      with a `ValidationError` — a finalized invoice is an immutable
+ *      accounting record, a cancelled invoice is closed history.
+ *
+ * Money & Calculation Rules:
+ *   5. Never trusts client-supplied totals/subtotals/discounts/taxes; every
+ *      monetary value is recalculated server-side via `calculateInvoice()`.
+ *
+ * Invariants preserved (all belong to finalization / payment flows, never to
+ * draft editing):
+ *   6. `invoiceNumber` (draft placeholder), `status` (`DRAFT`), `paidAmount`,
+ *      `finalizedAt` and `cancelledAt` are never modified here.
+ *   7. Does NOT consume or advance `InvoiceSettings.nextInvoiceNumber`.
+ *   8. Does NOT consume invoice quota or touch `UsagePeriod`.
+ *   9. Does NOT create immutable seller/customer snapshots or payments.
+ *
+ * Transactional Persistence & Concurrency:
+ *  10. Everything runs in one interactive transaction; the invoice row is
+ *      locked (`SELECT ... FOR UPDATE`) first — the same lock
+ *      `finalizeInvoice` takes as its first statement — so a draft edit can
+ *      never interleave with a concurrent finalization and overwrite the
+ *      finalized record. The loser sees the committed state and is rejected
+ *      by the DRAFT check before writing anything.
+ */
+export async function updateDraftInvoice(
+  businessId: string,
+  invoiceId: unknown,
+  input: unknown,
+): Promise<InvoiceRecord> {
+  // Preserve authentication before validation (matches createDraftInvoice convention)
+  const session = await requireSession();
+
+  // businessId / invoiceId are server-side identifiers from the action
+  // boundary; the request body may only carry the editable invoice payload.
+  const rawPayload =
+    typeof input === "object" && input !== null ? { ...input, businessId, invoiceId } : { businessId, invoiceId };
+  const data = parseUpdateDraftInvoiceInput(rawPayload);
+
+  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    // 0. Lock the invoice row FIRST (see note on finalizeInvoice step 0).
+    //    A missing invoice locks nothing and falls through to NotFoundError.
+    await tx.$queryRaw`SELECT id FROM "invoices" WHERE id = ${data.invoiceId} FOR UPDATE`;
+
+    // 1. Verify business ownership and state
+    const business = await tx.business.findUnique({
+      where: { id: data.businessId },
+    });
+
+    if (!business) {
+      throw new NotFoundError("Business not found");
+    }
+
+    if (business.accountId !== session.accountId) {
+      throw new ForbiddenError("Business does not belong to this account");
+    }
+
+    if (business.archivedAt !== null) {
+      throw new ValidationError("Cannot edit an invoice of an archived business");
+    }
+
+    // 2. Load the invoice (authoritative: post-lock) and bind it to the business
+    const invoice = await tx.invoice.findUnique({
+      where: { id: data.invoiceId },
+    });
+
+    if (!invoice) {
+      throw new NotFoundError("Invoice not found");
+    }
+
+    if (invoice.businessId !== business.id) {
+      throw new ForbiddenError("Invoice does not belong to this business");
+    }
+
+    // 3. Lifecycle rule — only drafts are editable
+    if (invoice.status !== "DRAFT") {
+      throw new ValidationError(
+        invoice.cancelledAt !== null || invoice.status === "CANCELLED"
+          ? "Cancelled invoices cannot be edited"
+          : "Only draft invoices can be edited; this invoice is already finalized",
+      );
+    }
+
+    // 4. Verify customer (if provided)
+    if (data.customerId) {
+      await assertCustomerReference(tx, business.id, data.customerId);
+    }
+
+    // 5. Verify products (if referenced by line items)
+    await assertProductReferences(tx, business.id, data.items);
+
+    // 6. Resolve tax rate (explicit taxPercent > business defaultVatPercent > 0)
+    const taxPercent = await resolveDraftTaxPercent(tx, business.id, data.taxPercent);
+
+    // 7. Authoritative recalculation via pure calculation engine
+    const calculationInput: InvoiceCalculationInput = {
+      items: data.items.map((item) => ({
+        unitPrice: item.unitPrice,
+        quantity: item.quantity,
+        discountPercent: item.discountPercent ?? 0,
+      })),
+      globalDiscountPercent: data.globalDiscountPercent ?? 0,
+      taxPercent,
+    };
+
+    const calcResult = calculateInvoice(calculationInput);
+
+    // 8. Parse issue and due dates
+    const issueDate = data.issueDate ? new Date(data.issueDate) : new Date();
+    const dueDate = data.dueDate ? new Date(data.dueDate) : null;
+
+    // 9. Replace line items atomically. Draft items are throwaway rows (the
+    //    immutable accounting record starts at finalization), so a full
+    //    delete + nested re-create keeps the diff semantics simple and the
+    //    stored line values always match the authoritative recalculation.
+    await tx.invoiceItem.deleteMany({ where: { invoiceId: invoice.id } });
+
+    // 10. Persist the updated draft. `invoiceNumber`, `status`, `paidAmount`,
+    //     `finalizedAt` and `cancelledAt` are deliberately absent. Any payment
+    //     recorded earlier stays intact; the remaining amount is re-derived
+    //     from the recalculated total and the preserved paid amount.
+    const updated = await tx.invoice.update({
+      where: { id: invoice.id },
+      data: {
+        customerId: data.customerId ?? null,
+        invoiceType: data.invoiceType ?? "FINAL",
+        issueDate,
+        dueDate,
+        subtotal: calcResult.subtotal,
+        itemDiscountAmount: calcResult.itemDiscountAmount,
+        globalDiscountPercent: calcResult.globalDiscountPercent,
+        globalDiscountAmount: calcResult.globalDiscountAmount,
+        taxPercent: calcResult.taxPercent,
+        taxAmount: calcResult.taxAmount,
+        taxableAmount: calcResult.taxableAmount,
+        total: calcResult.total,
+        remainingAmount: calculateRemainingAmount(calcResult.total, invoice.paidAmount),
+        notes: data.notes ?? null,
+        items: {
+          create: data.items.map((item, index) => {
+            const lineCalc = calcResult.items[index];
+            const itemDate = item.itemDate ? new Date(item.itemDate) : null;
+            return {
+              productId: item.productId ?? null,
+              title: item.title,
+              description: item.description ?? null,
+              itemDate,
+              unitPrice: new Decimal(item.unitPrice),
+              quantity: new Decimal(item.quantity),
+              unit: item.unit ?? null,
+              discountPercent: new Decimal(item.discountPercent ?? 0),
+              discountAmount: lineCalc!.discountAmount,
+              subtotal: lineCalc!.subtotal,
+              total: lineCalc!.total,
+              sortOrder: item.sortOrder ?? index,
+            };
+          }),
+        },
+      },
+      include: {
+        items: {
+          orderBy: { sortOrder: "asc" },
+        },
+      },
+    });
+
+    return updated as unknown as InvoiceRecord;
   });
 }
 

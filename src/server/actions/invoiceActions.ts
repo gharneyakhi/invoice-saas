@@ -6,6 +6,7 @@ import {
   finalizeInvoice as finalizeInvoiceService,
   getInvoice as getInvoiceService,
   listInvoices as listInvoicesService,
+  updateDraftInvoice as updateDraftInvoiceService,
 } from "@/server/invoice/invoiceService";
 import { runAction, type ActionResult } from "@/server/actions/actionResult";
 import {
@@ -75,6 +76,25 @@ export async function createDraftInvoice(
   return runAction(async () => {
     await requireSession();
     const record = await createDraftInvoiceService(businessId, input);
+    return toInvoiceDetailDTO(record);
+  });
+}
+
+/**
+ * Replaces the editable content of an existing DRAFT invoice the caller owns.
+ * The payload may only carry line-item inputs, dates and percent fields;
+ * ownership, the draft-only lifecycle rule and the authoritative money
+ * recalculation all live in `invoiceService`. Server-owned fields (status,
+ * invoice number, totals, paid/remaining amounts) can never be supplied here.
+ */
+export async function updateDraftInvoice(
+  businessId: string,
+  invoiceId: string,
+  input: unknown,
+): Promise<ActionResult<InvoiceDetailDTO>> {
+  return runAction(async () => {
+    await requireSession();
+    const record = await updateDraftInvoiceService(businessId, invoiceId, input);
     return toInvoiceDetailDTO(record);
   });
 }
