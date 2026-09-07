@@ -42,6 +42,7 @@ const invoiceSvc = vi.hoisted(() => ({
   listInvoices: vi.fn(),
   getInvoice: vi.fn(),
   createDraftInvoice: vi.fn(),
+  updateDraftInvoice: vi.fn(),
   finalizeInvoice: vi.fn(),
 }));
 
@@ -442,6 +443,40 @@ describe("invoice actions", () => {
     expect(result.data.items).toHaveLength(1);
     expect(result.data.items[0]?.unitPrice).toBe("100000.00");
     expect(result.data).not.toHaveProperty("createdAt", expect.any(Date));
+  });
+
+  it("updates a draft invoice, forwarding (businessId, invoiceId, input) and returning a detail DTO", async () => {
+    const { updateDraftInvoice } = await import("./invoiceActions");
+    invoiceSvc.updateDraftInvoice.mockResolvedValue(invoiceRecord());
+
+    const payload = {
+      invoiceType: "PROFORMA",
+      items: [{ title: "خدمت ویرایش‌شده", unitPrice: 50000, quantity: 2 }],
+    };
+    const result = await updateDraftInvoice("biz-1", "inv-1", payload);
+
+    expect(invoiceSvc.updateDraftInvoice).toHaveBeenCalledWith("biz-1", "inv-1", payload);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.id).toBe("inv-1");
+    expect(result.data.total).toBe("109000.00");
+    expect(result.data.items).toHaveLength(1);
+  });
+
+  it("maps a draft-update lifecycle rejection to VALIDATION_ERROR", async () => {
+    const { ValidationError } = await import("@/server/errors");
+    const { updateDraftInvoice } = await import("./invoiceActions");
+    invoiceSvc.updateDraftInvoice.mockRejectedValue(
+      new ValidationError("Only draft invoices can be edited; this invoice is already finalized"),
+    );
+
+    const result = await updateDraftInvoice("biz-1", "inv-1", {
+      items: [{ title: "x", unitPrice: 1, quantity: 1 }],
+    });
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.code).toBe("VALIDATION_ERROR");
   });
 
   it("finalizes an invoice and returns a fully serializable result (no Decimal/Date objects)", async () => {
