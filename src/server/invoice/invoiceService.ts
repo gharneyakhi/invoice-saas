@@ -143,6 +143,226 @@ export interface ListInvoicesOptions {
   limit?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Invoice list query (Invoice List V1) — search / filter / sort / paginate
+// ---------------------------------------------------------------------------
+
+/** Sort keys the invoice list UI is allowed to ask for (allow-list, never raw SQL). */
+export const INVOICE_SORT_KEYS = ["createdAt", "issueDate", "dueDate", "total", "invoiceNumber"] as const;
+export type InvoiceSortKey = (typeof INVOICE_SORT_KEYS)[number];
+export type InvoiceSortDirection = "asc" | "desc";
+
+/** Lifecycle grouping used by the list UI's primary tabs. */
+export type InvoiceLifecycleFilter = "ALL" | "DRAFT" | "FINALIZED" | "CANCELLED";
+
+export const INVOICE_LIST_DEFAULT_PAGE_SIZE = 20;
+export const INVOICE_LIST_MAX_PAGE_SIZE = 100;
+
+export interface QueryInvoicesOptions {
+  /** Free-text search over invoice number, customer name and notes. */
+  search?: string;
+  /** Exact payment/lifecycle statuses to include (allow-listed by the caller's schema). */
+  statuses?: InvoiceRecord["status"][];
+  /** Draft vs finalized vs cancelled grouping. */
+  lifecycle?: InvoiceLifecycleFilter;
+  /** PROFORMA / FINAL filter. */
+  invoiceType?: InvoiceRecord["invoiceType"];
+  /** Restrict to one customer of the same business. */
+  customerId?: string;
+  /** Issue-date window (inclusive lower / upper bound). */
+  issuedFrom?: Date;
+  issuedTo?: Date;
+  sortBy?: InvoiceSortKey;
+  sortDirection?: InvoiceSortDirection;
+  /** 1-based page number. */
+  page?: number;
+  /** Rows per page, hard-capped at {@link INVOICE_LIST_MAX_PAGE_SIZE}. */
+  pageSize?: number;
+}
+
+/** One row of the invoice list, plus the (current) customer name for display. */
+export interface InvoiceListRow extends InvoiceRecord {
+  customerName: string | null;
+}
+
+export interface InvoiceListResult {
+  rows: InvoiceListRow[];
+  /** Total rows matching the filters (not just this page). */
+  total: number;
+  page: number;
+  pageSize: number;
+  pageCount: number;
+  /** Counts per lifecycle group for the *unfiltered* business, for the tabs. */
+  lifecycleCounts: { all: number; draft: number; finalized: number; cancelled: number };
+}
+
+const FINALIZED_STATUSES: InvoiceRecord["status"][] = [
+  "ISSUED",
+  "SENT",
+  "PENDING_PAYMENT",
+  "PARTIALLY_PAID",
+  "PAID",
+  "OVERDUE",
+];
+
+/**
+ * Turns the inclusive "issued up to" day the user picked into an *exclusive*
+ * upper bound one day later.
+ *
+ * `issueDate` is a timestamp, not a date: invoices created without an explicit
+ * issue date are stored with the full current time (`new Date()`), while the
+ * editor's `YYYY-MM-DD` input parses to midnight UTC. A naive `lte: 2026-03-01`
+ * would therefore silently exclude every invoice issued *during* 2026-03-01.
+ * Comparing `< 2026-03-02T00:00Z` keeps the filter inclusive of the whole day,
+ * matching the UTC day boundary the write path already uses.
+ *
+ * A bound that already carries a time component (an explicit ISO timestamp) is
+ * left exactly as given.
+ */
+function exclusiveUpperBound(issuedTo: Date): Date {
+  const isMidnightUtc =
+    issuedTo.getUTCHours() === 0 &&
+    issuedTo.getUTCMinutes() === 0 &&
+    issuedTo.getUTCSeconds() === 0 &&
+    issuedTo.getUTCMilliseconds() === 0;
+
+  if (!isMidnightUtc) return issuedTo;
+
+  const next = new Date(issuedTo.getTime());
+  next.setUTCDate(next.getUTCDate() + 1);
+  return next;
+}
+
+function lifecycleWhere(lifecycle: InvoiceLifecycleFilter | undefined) {
+  switch (lifecycle) {
+    case "DRAFT":
+      return { status: "DRAFT" as const };
+    case "FINALIZED":
+      return { status: { in: FINALIZED_STATUSES } };
+    case "CANCELLED":
+      return { status: "CANCELLED" as const };
+    default:
+      return {};
+  }
+}
+
+/**
+ * Search / filter / sort / paginate the invoices of a business the caller owns.
+ *
+ * Ownership is proven by `requireBusinessOwnership(businessId)` and the query is
+ * scoped to the verified row's `id`, so a foreign `businessId` can never widen
+ * the result set. Every user-controllable knob is sanitised here:
+ *
+ *   - `sortBy` is matched against an allow-list ({@link INVOICE_SORT_KEYS});
+ *   - `pageSize` is clamped to {@link INVOICE_LIST_MAX_PAGE_SIZE} so the list
+ *     can never become an unbounded `SELECT *`;
+ *   - `customerId` is intersected with the same business, so filtering by a
+ *     foreign customer simply yields nothing rather than leaking rows.
+ *
+ * No line items or snapshots are loaded — only the summary columns the list
+ * renders, plus the customer's current name.
+ */
+export async function queryInvoices(
+  businessId: string,
+  options: QueryInvoicesOptions = {},
+): Promise<InvoiceListResult> {
+  const owned = await requireBusinessOwnership(businessId);
+
+  const pageSize = Math.max(
+    1,
+    Math.min(options.pageSize ?? INVOICE_LIST_DEFAULT_PAGE_SIZE, INVOICE_LIST_MAX_PAGE_SIZE),
+  );
+  const page = Math.max(1, Math.floor(options.page ?? 1));
+
+  const sortBy: InvoiceSortKey = INVOICE_SORT_KEYS.includes(options.sortBy as InvoiceSortKey)
+    ? (options.sortBy as InvoiceSortKey)
+    : "createdAt";
+  const sortDirection: InvoiceSortDirection = options.sortDirection === "asc" ? "asc" : "desc";
+
+  const search = (options.search ?? "").trim();
+
+  const where: Record<string, unknown> = {
+    businessId: owned.id, // verified row id — never the raw client value
+    ...lifecycleWhere(options.lifecycle),
+  };
+
+  if (options.statuses && options.statuses.length > 0) {
+    // Intersect with the lifecycle grouping instead of overwriting it.
+    where.AND = [
+      ...(Array.isArray(where.AND) ? (where.AND as unknown[]) : []),
+      { status: { in: options.statuses } },
+    ];
+  }
+
+  if (options.invoiceType) {
+    where.invoiceType = options.invoiceType;
+  }
+
+  if (options.customerId) {
+    where.customerId = options.customerId;
+  }
+
+  if (options.issuedFrom || options.issuedTo) {
+    where.issueDate = {
+      ...(options.issuedFrom ? { gte: options.issuedFrom } : {}),
+      ...(options.issuedTo ? { lt: exclusiveUpperBound(options.issuedTo) } : {}),
+    };
+  }
+
+  if (search !== "") {
+    where.OR = [
+      { invoiceNumber: { contains: search, mode: "insensitive" } },
+      { notes: { contains: search, mode: "insensitive" } },
+      { customer: { is: { name: { contains: search, mode: "insensitive" } } } },
+    ];
+  }
+
+  // Deterministic ordering: the requested key first, `id` always last so rows
+  // never swap places between pages when the sort key ties.
+  const orderBy =
+    sortBy === "createdAt"
+      ? [{ createdAt: sortDirection }, { id: "asc" as const }]
+      : [{ [sortBy]: sortDirection }, { createdAt: "desc" as const }, { id: "asc" as const }];
+
+  const baseWhere = { businessId: owned.id };
+
+  const [total, rows, draftCount, finalizedCount, cancelledCount, allCount] = await Promise.all([
+    prisma.invoice.count({ where: where as never }),
+    prisma.invoice.findMany({
+      where,
+      orderBy,
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      include: { customer: { select: { name: true } } },
+    } as never),
+    prisma.invoice.count({ where: { ...baseWhere, status: "DRAFT" } }),
+    prisma.invoice.count({ where: { ...baseWhere, status: { in: FINALIZED_STATUSES } } }),
+    prisma.invoice.count({ where: { ...baseWhere, status: "CANCELLED" } }),
+    prisma.invoice.count({ where: baseWhere }),
+  ]);
+
+  const pageCount = total === 0 ? 0 : Math.ceil(total / pageSize);
+
+  return {
+    rows: (rows as unknown as (InvoiceRecord & { customer?: { name: string } | null })[]).map(
+      (row) => {
+        const { customer, ...rest } = row;
+        return { ...(rest as InvoiceRecord), customerName: customer?.name ?? null };
+      },
+    ),
+    total,
+    page,
+    pageSize,
+    pageCount,
+    lifecycleCounts: {
+      all: allCount,
+      draft: draftCount,
+      finalized: finalizedCount,
+      cancelled: cancelledCount,
+    },
+  };
+}
+
 function assertInvoiceId(invoiceId: unknown): string {
   if (typeof invoiceId !== "string" || invoiceId.trim() === "") {
     throw new ValidationError("Invoice ID is required");

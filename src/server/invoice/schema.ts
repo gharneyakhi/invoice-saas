@@ -207,3 +207,53 @@ export function parseUpdateDraftInvoiceInput(input: unknown): UpdateDraftInvoice
   }
   return result.data;
 }
+
+// ---------------------------------------------------------------------------
+// Invoice list query (Invoice List V1)
+// ---------------------------------------------------------------------------
+
+export const INVOICE_STATUS_VALUES = [
+  "DRAFT",
+  "ISSUED",
+  "SENT",
+  "PENDING_PAYMENT",
+  "PARTIALLY_PAID",
+  "PAID",
+  "OVERDUE",
+  "CANCELLED",
+] as const;
+
+/**
+ * Contract for the invoice list screen. Every knob the URL can carry is
+ * allow-listed here (sort keys, statuses, lifecycle group, page size ceiling)
+ * so a hand-crafted query string can never turn the list into an unbounded or
+ * arbitrary query. Unknown keys are rejected by `.strict()`.
+ */
+export const invoiceListQuerySchema = z
+  .object({
+    search: z.string().trim().max(200, "Search term must be at most 200 characters").optional(),
+    statuses: z.array(z.enum(INVOICE_STATUS_VALUES)).max(8).optional(),
+    lifecycle: z.enum(["ALL", "DRAFT", "FINALIZED", "CANCELLED"]).optional().default("ALL"),
+    invoiceType: z.enum(["PROFORMA", "FINAL"]).optional(),
+    customerId: z.string().trim().min(1).optional(),
+    issuedFrom: dateInputSchema.optional(),
+    issuedTo: dateInputSchema.optional(),
+    sortBy: z
+      .enum(["createdAt", "issueDate", "dueDate", "total", "invoiceNumber"])
+      .optional()
+      .default("createdAt"),
+    sortDirection: z.enum(["asc", "desc"]).optional().default("desc"),
+    page: z.coerce.number().int().min(1).optional().default(1),
+    pageSize: z.coerce.number().int().min(1).max(100).optional().default(20),
+  })
+  .strict();
+
+export type InvoiceListQueryInput = z.infer<typeof invoiceListQuerySchema>;
+
+export function parseInvoiceListQuery(input: unknown): InvoiceListQueryInput {
+  const result = invoiceListQuerySchema.safeParse(input ?? {});
+  if (!result.success) {
+    throw new ValidationError(`Invalid invoice list query — ${formatZodIssues(result.error)}`);
+  }
+  return result.data;
+}
