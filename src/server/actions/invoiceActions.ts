@@ -6,11 +6,15 @@ import {
   finalizeInvoice as finalizeInvoiceService,
   getInvoice as getInvoiceService,
   listInvoices as listInvoicesService,
+  queryInvoices as queryInvoicesService,
   updateDraftInvoice as updateDraftInvoiceService,
 } from "@/server/invoice/invoiceService";
 import { runAction, type ActionResult } from "@/server/actions/actionResult";
+import { parseInvoiceListQuery } from "@/server/invoice/schema";
 import {
   toInvoiceDTO,
+  toInvoiceListDTO,
+  type InvoiceListDTO,
   toInvoiceDetailDTO,
   type InvoiceDetailDTO,
   type InvoiceDTO,
@@ -49,6 +53,44 @@ export async function listInvoices(
       ...(args.limit !== undefined ? { limit: args.limit } : {}),
     });
     return records.map(toInvoiceDTO);
+  });
+}
+
+/**
+ * Search / filter / sort / paginate the invoices of a business the caller owns.
+ *
+ * The raw query object (typically built from the URL search params) is parsed
+ * by `parseInvoiceListQuery` before it reaches the service, so unknown keys,
+ * unsupported sort columns and oversized page sizes are rejected at the
+ * boundary. Ownership and business isolation remain server-side in
+ * `invoiceService.queryInvoices`.
+ */
+/** `issuedFrom`/`issuedTo` arrive as an ISO string or a Date; normalise to Date. */
+function toDate(value: Date | string): Date {
+  return value instanceof Date ? value : new Date(value);
+}
+
+export async function queryInvoices(
+  businessId: string,
+  query: unknown,
+): Promise<ActionResult<InvoiceListDTO>> {
+  return runAction(async () => {
+    await requireSession();
+    const parsed = parseInvoiceListQuery(query);
+    const result = await queryInvoicesService(businessId, {
+      ...(parsed.search ? { search: parsed.search } : {}),
+      ...(parsed.statuses ? { statuses: parsed.statuses } : {}),
+      lifecycle: parsed.lifecycle,
+      ...(parsed.invoiceType ? { invoiceType: parsed.invoiceType } : {}),
+      ...(parsed.customerId ? { customerId: parsed.customerId } : {}),
+      ...(parsed.issuedFrom ? { issuedFrom: toDate(parsed.issuedFrom) } : {}),
+      ...(parsed.issuedTo ? { issuedTo: toDate(parsed.issuedTo) } : {}),
+      sortBy: parsed.sortBy,
+      sortDirection: parsed.sortDirection,
+      page: parsed.page,
+      pageSize: parsed.pageSize,
+    });
+    return toInvoiceListDTO(result);
   });
 }
 

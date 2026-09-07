@@ -2,7 +2,11 @@ import Decimal from "decimal.js";
 import type { BusinessRecord } from "@/server/business/businessService";
 import type { CustomerRecord } from "@/server/customer/customerService";
 import type { ProductRecord } from "@/server/product/productService";
-import type { InvoiceRecord } from "@/server/invoice/invoiceService";
+import type {
+  InvoiceListResult,
+  InvoiceListRow,
+  InvoiceRecord,
+} from "@/server/invoice/invoiceService";
 import type { InvoicePaymentRecord } from "@/server/payment/paymentService";
 
 /**
@@ -192,6 +196,20 @@ export interface InvoiceDetailDTO extends InvoiceDTO {
   items: InvoiceLineItemDTO[];
 }
 
+/** List row — summary columns plus the customer's current display name. */
+export interface InvoiceListRowDTO extends InvoiceDTO {
+  customerName: string | null;
+}
+
+export interface InvoiceListDTO {
+  rows: InvoiceListRowDTO[];
+  total: number;
+  page: number;
+  pageSize: number;
+  pageCount: number;
+  lifecycleCounts: { all: number; draft: number; finalized: number; cancelled: number };
+}
+
 function toLineItemDTO(item: NonNullable<InvoiceRecord["items"]>[number]): InvoiceLineItemDTO {
   return {
     id: item.id,
@@ -241,6 +259,23 @@ function toInvoiceBaseDTO(row: InvoiceRecord): InvoiceDTO {
 /** List / summary view — no line items or snapshots. */
 export function toInvoiceDTO(row: InvoiceRecord): InvoiceDTO {
   return toInvoiceBaseDTO(row);
+}
+
+/** List view — summary row plus the joined customer name. */
+export function toInvoiceListRowDTO(row: InvoiceListRow): InvoiceListRowDTO {
+  return { ...toInvoiceBaseDTO(row), customerName: row.customerName ?? null };
+}
+
+/** Paginated list payload for the invoice list screen. */
+export function toInvoiceListDTO(result: InvoiceListResult): InvoiceListDTO {
+  return {
+    rows: result.rows.map(toInvoiceListRowDTO),
+    total: result.total,
+    page: result.page,
+    pageSize: result.pageSize,
+    pageCount: result.pageCount,
+    lifecycleCounts: result.lifecycleCounts,
+  };
 }
 
 /** Detail view — includes ordered line items. */

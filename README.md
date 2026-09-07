@@ -57,6 +57,43 @@ Account for invoice quota (`UsagePeriod`).
 
 **Verified, not just written:** `npx vitest run` → 17/17 tests pass.
 
+## 2b. Invoice List V1 (`/dashboard/invoices`)
+
+The invoice list is a **server component** rendering real rows only — there is
+no mock data and no client-side filtering of a pre-fetched set.
+
+```
+/dashboard/invoices?search=&lifecycle=&status=&type=&customerId=&from=&to=&sortBy=&sortDir=&page=
+        │
+        ├─ parseInvoiceListQuery()          zod .strict() allow-list of every knob
+        ├─ invoiceService.queryInvoices()   requireBusinessOwnership + bounded query
+        └─ toInvoiceListDTO()               Decimal→string, Date→ISO
+```
+
+- **Isolation / authorization** — `queryInvoices` proves ownership with
+  `requireBusinessOwnership(businessId)` and scopes the query to the *verified*
+  Business row's id. A foreign `businessId` or `customerId` can never widen the
+  result set.
+- **Bounded results** — `pageSize` is clamped to `INVOICE_LIST_MAX_PAGE_SIZE`
+  (100, default 20) and sort keys are matched against `INVOICE_SORT_KEYS`, so
+  the list can never degrade into an unbounded or arbitrary query.
+- **Search** — invoice number, notes and the customer's name (case-insensitive).
+- **Filters** — lifecycle tabs (all / draft / finalized / cancelled), payment
+  status, invoice type, customer, and an issue-date range.
+- **Sorting** — created/issue/due date, total, invoice number; `id` is always
+  the final tie-breaker so rows never swap places between pages.
+- **Row actions follow the lifecycle rule** — `DRAFT` → «ادامه ویرایش» (reopens
+  the editor at `/dashboard/invoices/new?invoiceId=…`), everything else →
+  «مشاهده» (read-only `/dashboard/invoices/[invoiceId]`, since finalized
+  invoices are immutable).
+- **States** — `loading.tsx` skeleton, `error.tsx` boundary, an inline error
+  notice for a failed query, and distinct empty states for "no business",
+  "no invoices yet" and "no matches for these filters".
+- **RTL & responsive** — table on desktop, stacked cards below `md`.
+
+Out of scope for V1 (unchanged): PDF, Excel, Gmail, Telegram, billing and
+finalization actions.
+
 ## 3. What's explicitly NOT built yet (by design — see roadmap)
 
 Per the Master Build Prompt's own instruction (section 55/56): don't
