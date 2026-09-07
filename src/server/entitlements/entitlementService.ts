@@ -144,11 +144,11 @@ export async function resolveEntitlements(
   // on in businessService.ts), and the annotation keeps `selected.plan` a full
   // `PlanRow` for the mapper below instead of degrading to the light selection
   // shape.
-  const subscriptionRows: SubscriptionRowWithPlan[] = await db.subscription.findMany({
+  const subscriptionRows = (await db.subscription.findMany({
     where: { accountId },
     orderBy: SUBSCRIPTION_ORDER_BY,
     include: { plan: { include: { planFeatures: { include: { feature: true } } } } },
-  });
+  })) as unknown as SubscriptionRowWithPlan[];
 
   const selection = selectCurrentSubscription(subscriptionRows, now);
   const subscription = enforcedSubscriptionContext(selection);

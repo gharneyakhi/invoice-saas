@@ -19,6 +19,7 @@ const businessSvc = vi.hoisted(() => ({
   createBusiness: vi.fn(),
   updateBusiness: vi.fn(),
   archiveBusiness: vi.fn(),
+  setPrimaryBusiness: vi.fn(),
 }));
 
 const customerSvc = vi.hoisted(() => ({
@@ -321,6 +322,19 @@ describe("business actions", () => {
     expect(archResult).toEqual({
       success: true,
       data: expect.objectContaining({ archivedAt: "2026-03-08T00:00:00.000Z" }),
+    });
+  });
+
+  it("sets primary business and serializes the updated DTO", async () => {
+    const { setPrimaryBusiness } = await import("./businessActions");
+    businessSvc.setPrimaryBusiness.mockResolvedValue(businessRecord({ id: "biz-2", isPrimary: true }));
+
+    const result = await setPrimaryBusiness("biz-2");
+
+    expect(businessSvc.setPrimaryBusiness).toHaveBeenCalledWith("biz-2");
+    expect(result).toEqual({
+      success: true,
+      data: expect.objectContaining({ id: "biz-2", isPrimary: true }),
     });
   });
 });

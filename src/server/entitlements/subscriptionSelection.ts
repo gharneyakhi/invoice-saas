@@ -107,9 +107,9 @@ export interface SubscriptionSelection<T extends SubscriptionSelectionRow> {
  * is stable across calls even when several rows share a `startDate`.
  */
 export const SUBSCRIPTION_ORDER_BY = [
-  { startDate: "desc" },
-  { createdAt: "desc" },
-  { id: "desc" },
+  { startDate: "desc" as const },
+  { createdAt: "desc" as const },
+  { id: "desc" as const },
 ];
 
 export function evaluateSubscriptionRow<T extends SubscriptionSelectionRow>(

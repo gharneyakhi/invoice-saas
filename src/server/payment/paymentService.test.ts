@@ -169,7 +169,7 @@ const VALID_CREATE = { amount: "40000", method: "CARD" as const };
  * and an assertion on `undefined` would read as a confusing type error
  * instead of a clear test failure.
  */
-/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable */
 function nthCall(fn: { mock: { calls: any[] } }, index: number): any {
   const call = fn.mock.calls[index];
   if (!call) {

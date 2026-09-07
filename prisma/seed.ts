@@ -121,9 +121,9 @@ async function main() {
 
     for (const featureKey of p.features) {
       await prisma.planFeature.upsert({
-        where: { planId_featureId: { planId: plan.id, featureId: featureRecords[featureKey] } },
+        where: { planId_featureId: { planId: plan.id, featureId: featureRecords[featureKey]! } },
         update: { enabled: true },
-        create: { planId: plan.id, featureId: featureRecords[featureKey], enabled: true },
+        create: { planId: plan.id, featureId: featureRecords[featureKey]!, enabled: true },
       });
     }
   }

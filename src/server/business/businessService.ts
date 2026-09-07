@@ -3,7 +3,7 @@ import type { UsageContext } from "@/lib/entitlements";
 import { prisma } from "@/lib/prisma";
 import { requireBusinessOwnership } from "@/server/auth/requireBusinessOwnership";
 import { requireSession } from "@/server/auth/requireSession";
-import { BusinessLimitReachedError, EntitlementDataError } from "@/server/errors";
+import { BusinessLimitReachedError, EntitlementDataError, ValidationError } from "@/server/errors";
 import { entitlementCanCreateBusiness, resolveEntitlements } from "@/server/entitlements/entitlementService";
 import { parseCreateBusinessInput, parseUpdateBusinessInput } from "@/server/business/schema";
 
@@ -60,9 +60,9 @@ export interface ListBusinessesOptions {
  * never re-shuffles rows created in the same millisecond.
  */
 export const BUSINESS_LIST_ORDER_BY = [
-  { isPrimary: "desc" },
-  { createdAt: "asc" },
-  { id: "asc" },
+  { isPrimary: "desc" as const },
+  { createdAt: "asc" as const },
+  { id: "asc" as const },
 ];
 
 /**
@@ -253,3 +253,38 @@ export async function archiveBusiness(businessId: string): Promise<BusinessRecor
     return archived;
   });
 }
+
+/**
+ * Sets an owned business as the primary business for the authenticated account.
+ * Atomically marks all other businesses of the account as `isPrimary: false`
+ * and the target business as `isPrimary: true`.
+ *
+ * Idempotent: setting an already primary business returns the current record.
+ * Rejects archived businesses with `ValidationError`.
+ */
+export async function setPrimaryBusiness(businessId: string): Promise<BusinessRecord> {
+  const owned = await requireBusinessOwnership(businessId);
+
+  if (owned.archivedAt) {
+    throw new ValidationError("Cannot set an archived business as primary");
+  }
+
+  if (owned.isPrimary) {
+    return owned;
+  }
+
+  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.business.updateMany({
+      where: { accountId: owned.accountId, isPrimary: true },
+      data: { isPrimary: false },
+    });
+
+    const updated: BusinessRecord = await tx.business.update({
+      where: { id: owned.id },
+      data: { isPrimary: true },
+    });
+
+    return updated;
+  });
+}
+

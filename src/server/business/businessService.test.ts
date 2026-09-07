@@ -19,6 +19,7 @@ const prismaMock = vi.hoisted(() => ({
     findUnique: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
+    updateMany: vi.fn(),
     // Present only so we can assert that the archive path never reaches for
     // a hard delete (historical data must survive).
     delete: vi.fn(),
@@ -724,3 +725,54 @@ describe("archiveBusiness", () => {
     expect(prismaMock.business.update).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("setPrimaryBusiness", () => {
+  it("rejects an archived business", async () => {
+    const { setPrimaryBusiness } = await import("./businessService");
+    const { ValidationError } = await import("@/server/errors");
+
+    prismaMock.business.findUnique.mockResolvedValue(
+      businessRow({ id: "biz-1", archivedAt: new Date("2026-03-01") }),
+    );
+
+    await expect(setPrimaryBusiness("biz-1")).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("returns immediately if the business is already primary", async () => {
+    const { setPrimaryBusiness } = await import("./businessService");
+
+    const primaryRow = businessRow({ id: "biz-1", isPrimary: true });
+    prismaMock.business.findUnique.mockResolvedValue(primaryRow);
+
+    const result = await setPrimaryBusiness("biz-1");
+
+    expect(result.id).toBe("biz-1");
+    expect(prismaMock.business.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.business.update).not.toHaveBeenCalled();
+  });
+
+  it("atomically clears other primary flags and sets target business as primary", async () => {
+    const { setPrimaryBusiness } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(
+      businessRow({ id: "biz-2", isPrimary: false }),
+    );
+    prismaMock.business.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.business.update.mockResolvedValue(
+      businessRow({ id: "biz-2", isPrimary: true }),
+    );
+
+    const result = await setPrimaryBusiness("biz-2");
+
+    expect(prismaMock.business.updateMany).toHaveBeenCalledWith({
+      where: { accountId: "acc-1", isPrimary: true },
+      data: { isPrimary: false },
+    });
+    expect(prismaMock.business.update).toHaveBeenCalledWith({
+      where: { id: "biz-2" },
+      data: { isPrimary: true },
+    });
+    expect(result.isPrimary).toBe(true);
+  });
+});
+
