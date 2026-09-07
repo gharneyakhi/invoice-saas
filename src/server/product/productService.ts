@@ -71,7 +71,7 @@ export interface ProductRecord {
  * Stable order for product pickers: by name, with `id` as a final tie-breaker
  * so two products sharing a name never swap places between requests.
  */
-export const PRODUCT_LIST_ORDER_BY = [{ name: "asc" }, { id: "asc" }];
+export const PRODUCT_LIST_ORDER_BY = [{ name: "asc" as const }, { id: "asc" as const }];
 
 function assertProductId(productId: unknown): string {
   if (typeof productId !== "string" || productId.trim() === "") {

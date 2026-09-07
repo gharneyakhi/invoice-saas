@@ -424,9 +424,9 @@ describe("createDraftInvoice", () => {
       // Verify returned object
       expect(result.status).toBe("DRAFT");
       expect(result.items).toHaveLength(2);
-      expect(result.items?.[0].subtotal.toString()).toBe("200000");
-      expect(result.items?.[0].discountAmount.toString()).toBe("20000");
-      expect(result.items?.[0].total.toString()).toBe("180000");
+      expect(result.items?.[0]!.subtotal.toString()).toBe("200000");
+      expect(result.items?.[0]!.discountAmount.toString()).toBe("20000");
+      expect(result.items?.[0]!.total.toString()).toBe("180000");
     });
 
     it("accepts (businessId, payload) signature style as well", async () => {
@@ -680,7 +680,7 @@ describe("createDraftInvoice", () => {
       await expect(
         createDraftInvoice({
           businessId: "biz-1",
-          items: [{ title: "مورد", unitPrice: 100, quantity: 1, ...itemOverrides }],
+          items: [{ title: "مورد", ...itemOverrides }],
         }),
       ).rejects.toBeInstanceOf(ValidationError);
     });

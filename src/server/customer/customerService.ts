@@ -68,7 +68,7 @@ export interface CustomerRecord {
  * tie-breaker so two customers sharing a name never swap places between
  * requests.
  */
-export const CUSTOMER_LIST_ORDER_BY = [{ name: "asc" }, { id: "asc" }];
+export const CUSTOMER_LIST_ORDER_BY = [{ name: "asc" as const }, { id: "asc" as const }];
 
 function assertCustomerId(customerId: unknown): string {
   if (typeof customerId !== "string" || customerId.trim() === "") {

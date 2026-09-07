@@ -1,11 +1,13 @@
 import { redirect } from "next/navigation";
 import { requireSession, UnauthorizedError, ForbiddenError } from "@/server/auth/requireSession";
 import { getDashboardData } from "@/server/dashboard/dashboardService";
-import { DashboardOverview } from "@/components/dashboard/DashboardOverview";
+import { AppShell } from "@/components/shell/AppShell";
 
-export const dynamic = "force-dynamic";
-
-export default async function DashboardPage() {
+export default async function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   let data;
   try {
     data = await getDashboardData();
@@ -16,5 +18,14 @@ export default async function DashboardPage() {
     throw err;
   }
 
-  return <DashboardOverview data={data} />;
+  return (
+    <AppShell
+      account={data.account}
+      currentBusiness={data.currentBusiness}
+      businesses={data.businesses}
+      plan={data.plan}
+    >
+      {children}
+    </AppShell>
+  );
 }

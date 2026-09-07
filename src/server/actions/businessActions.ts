@@ -6,6 +6,7 @@ import {
   createBusiness as createBusinessService,
   getBusiness as getBusinessService,
   listBusinesses as listBusinessesService,
+  setPrimaryBusiness as setPrimaryBusinessService,
   updateBusiness as updateBusinessService,
   type ListBusinessesOptions,
 } from "@/server/business/businessService";
@@ -84,3 +85,13 @@ export async function archiveBusiness(businessId: string): Promise<ActionResult<
     return toBusinessDTO(record);
   });
 }
+
+/** Sets an owned business as the primary business for the authenticated account. */
+export async function setPrimaryBusiness(businessId: string): Promise<ActionResult<BusinessDTO>> {
+  return runAction(async () => {
+    await requireSession();
+    const record = await setPrimaryBusinessService(businessId);
+    return toBusinessDTO(record);
+  });
+}
+

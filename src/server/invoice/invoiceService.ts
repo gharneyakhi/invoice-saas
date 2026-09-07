@@ -386,9 +386,9 @@ export async function createDraftInvoice(
               quantity: new Decimal(item.quantity),
               unit: item.unit ?? null,
               discountPercent: new Decimal(item.discountPercent ?? 0),
-              discountAmount: lineCalc.discountAmount,
-              subtotal: lineCalc.subtotal,
-              total: lineCalc.total,
+              discountAmount: lineCalc!.discountAmount,
+              subtotal: lineCalc!.subtotal,
+              total: lineCalc!.total,
               sortOrder: item.sortOrder ?? index,
             };
           }),
@@ -702,8 +702,8 @@ export async function finalizeInvoice(
 
     // 13. Persist authoritative line item values
     for (let i = 0; i < invoice.items.length; i++) {
-      const item = invoice.items[i];
-      const lineCalc = calcResult.items[i];
+      const item = invoice.items[i]!;
+      const lineCalc = calcResult.items[i]!;
       await tx.invoiceItem.update({
         where: { id: item.id },
         data: {
