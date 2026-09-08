@@ -9,6 +9,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InvoicePreviewDocument } from "@/components/invoice/InvoicePreviewDocument";
 import { InvoicePrintButton } from "@/components/invoice/InvoicePrintButton";
+import { InvoiceExportMenu } from "@/components/invoice/InvoiceExportMenu";
+import { GmailOutcomeBanner } from "@/components/invoice/GmailOutcomeBanner";
 import { AlertCircleIcon, ChevronRightIcon, EyeIcon } from "@/components/icons";
 
 /**
@@ -118,10 +120,22 @@ export default async function InvoicePreviewPage({ params }: InvoicePreviewPageP
           actions={
             <div className="flex flex-wrap items-center gap-2">
               <InvoicePrintButton />
+              {/* Export & Sharing V1 — file downloads + share dialogs; the
+                  menu prints this page in place (mode="preview"). */}
+              <InvoiceExportMenu
+                businessId={business.id}
+                invoiceId={preview.invoice.id}
+                isDraft={preview.isDraft}
+                mode="preview"
+              />
               <BackToInvoiceButton invoiceId={preview.invoice.id} />
             </div>
           }
         />
+        {/* Gmail connect outcome (?gmail=...) — toolbar-only, never printed. */}
+        <div className="mt-4">
+          <GmailOutcomeBanner />
+        </div>
       </div>
 
       {/* A4 document */}

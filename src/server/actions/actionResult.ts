@@ -10,6 +10,11 @@ import {
   NotFoundError,
   UnauthorizedError,
 } from "@/server/auth/requireSession";
+import {
+  GmailNotConnectedError,
+  GmailNotConfiguredError,
+  GmailSendError,
+} from "@/server/export/gmailErrors";
 
 /**
  * Serialization contract between the application/action boundary and the
@@ -37,6 +42,9 @@ export const ActionErrorCode = {
   ENTITLEMENT_DATA_ERROR: "ENTITLEMENT_DATA_ERROR",
   FILE_STORAGE_NOT_CONFIGURED: "FILE_STORAGE_NOT_CONFIGURED",
   FILE_STORAGE_UPLOAD_FAILED: "FILE_STORAGE_UPLOAD_FAILED",
+  GMAIL_NOT_CONNECTED: "GMAIL_NOT_CONNECTED",
+  GMAIL_SEND_FAILED: "GMAIL_SEND_FAILED",
+  GMAIL_NOT_CONFIGURED: "GMAIL_NOT_CONFIGURED",
   INTERNAL_ERROR: "INTERNAL_ERROR",
 } as const;
 
@@ -121,6 +129,15 @@ export function toActionError(error: unknown): { success: false; error: ActionEr
   }
   if (error instanceof EntitlementDataError) {
     return { success: false, error: { code: "ENTITLEMENT_DATA_ERROR", message: safeMessage(error, "Entitlement data is unavailable") } };
+  }
+  if (error instanceof GmailNotConnectedError) {
+    return { success: false, error: { code: "GMAIL_NOT_CONNECTED", message: safeMessage(error, "Gmail is not connected") } };
+  }
+  if (error instanceof GmailSendError) {
+    return { success: false, error: { code: "GMAIL_SEND_FAILED", message: safeMessage(error, "Sending through Gmail failed. Please try again.") } };
+  }
+  if (error instanceof GmailNotConfiguredError) {
+    return { success: false, error: { code: "GMAIL_NOT_CONFIGURED", message: "Gmail integration is not configured" } };
   }
 
   const fromCode = isKnownCodeError(error);
