@@ -478,7 +478,7 @@ describe("business actions", () => {
     });
   });
 
-  it("maps the deferred-storage upload refusal to FILE_STORAGE_NOT_CONFIGURED", async () => {
+  it("maps the not-configured storage refusal to FILE_STORAGE_NOT_CONFIGURED", async () => {
     const { FileStorageNotConfiguredError } = await import("@/server/errors");
     const { uploadBusinessImage } = await import("./businessActions");
 
@@ -537,6 +537,62 @@ describe("business actions", () => {
       error: { code: "UNAUTHORIZED", message: "Unauthorized" },
     });
     expect(businessSvc.uploadBusinessImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps a confirmed S3 upload failure to the stable FILE_STORAGE_UPLOAD_FAILED code", async () => {
+    const { FileStorageUploadFailedError } = await import("@/server/errors");
+    const { uploadBusinessImage } = await import("./businessActions");
+
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new File([new Uint8Array([1, 2, 3])], "logo.png", { type: "image/png" }),
+    );
+    businessSvc.uploadBusinessImage.mockRejectedValueOnce(new FileStorageUploadFailedError());
+
+    const result = await uploadBusinessImage("biz-1", "BUSINESS_LOGO", formData);
+
+    expect(result).toEqual({
+      success: false,
+      error: {
+        code: "FILE_STORAGE_UPLOAD_FAILED",
+        message: "File upload failed. Please try again.",
+      },
+    });
+  });
+
+  it("never leaks credentials or raw provider details to the client on a storage failure", async () => {
+    const { uploadBusinessImage } = await import("./businessActions");
+
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new File([new Uint8Array([1, 2, 3])], "logo.png", { type: "image/png" }),
+    );
+
+    // A raw AWS-style SDK error carrying credential/request details escapes
+    // the (mocked) service — the action boundary must still scrub it.
+    const rawSdkError = new Error(
+      "AccessDenied: The AWS Access Key Id AKIAIOSFODNN7EXAMPLE you provided with secret <hidden-secret> does not exist (RequestId: req-12345)",
+    );
+    rawSdkError.name = "S3ServiceException";
+    (rawSdkError as Error & { code?: string }).code = "AccessDenied";
+    businessSvc.uploadBusinessImage.mockRejectedValueOnce(rawSdkError);
+
+    const result = await uploadBusinessImage("biz-1", "BUSINESS_LOGO", formData);
+    expect(result.success).toBe(false);
+    expect(result).toEqual({
+      success: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "An unexpected error occurred. Please try again.",
+      },
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("AKIA");
+    expect(serialized).not.toContain("secret");
+    expect(serialized).not.toContain("AccessDenied");
+    expect(serialized).not.toContain("req-12345");
   });
 });
 

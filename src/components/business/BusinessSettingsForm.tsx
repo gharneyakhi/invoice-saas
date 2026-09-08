@@ -57,6 +57,7 @@ const SAVE_ERROR_MESSAGES: Record<ActionErrorCode, string> = {
   INVOICE_LIMIT_REACHED: "پلن فعلی شما اجازه این عملیات را نمی‌دهد.",
   ENTITLEMENT_DATA_ERROR: "اطلاعات اشتراک در دسترس نیست. لطفاً با پشتیبانی تماس بگیرید.",
   FILE_STORAGE_NOT_CONFIGURED: "سرویس ذخیره‌سازی فایل در دسترس نیست.",
+  FILE_STORAGE_UPLOAD_FAILED: "بارگذاری تصویر ناموفق بود؛ فایل روی سرور ذخیره نشد. کمی بعد دوباره تلاش کنید.",
   INTERNAL_ERROR: "خطای غیرمنتظره‌ای رخ داد. لطفاً چند لحظه بعد دوباره تلاش کنید.",
 };
 

@@ -7,7 +7,7 @@ import {
   NotFoundError,
   UnauthorizedError,
 } from "@/server/auth/requireSession";
-import { FILE_UPLOADS_ENABLED } from "@/server/storage/storageService";
+import { isFileUploadsEnabled } from "@/server/storage/storageService";
 import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -164,7 +164,7 @@ export default async function BusinessSettingsPage({
         initialName={record.business.name}
         initialProfile={dto.profile}
         initialInvoiceSettings={dto.invoiceSettings}
-        imageUploadsEnabled={FILE_UPLOADS_ENABLED}
+        imageUploadsEnabled={isFileUploadsEnabled()}
         readOnly={isArchived}
       />
     </div>

@@ -51,6 +51,7 @@ const FALLBACK_MESSAGES: Record<ActionErrorCode, string> = {
   BUSINESS_LIMIT_REACHED: "سقف کسب‌وکارهای فعال تکمیل شده است.",
   ENTITLEMENT_DATA_ERROR: "اطلاعات اشتراک برای نهایی کردن در دسترس نیست. کمی بعد تلاش کنید.",
   FILE_STORAGE_NOT_CONFIGURED: "سرویس ذخیره‌سازی فایل در دسترس نیست.",
+  FILE_STORAGE_UPLOAD_FAILED: "ذخیره‌سازی فایل ناموفق بود؛ دوباره تلاش کنید.",
   INTERNAL_ERROR: "خطای غیرمنتظره‌ای رخ داد. دوباره تلاش کنید و در صورت تکرار بعداً مراجعه کنید.",
 };
 

@@ -45,6 +45,7 @@ const SAVE_ERROR_MESSAGES: Record<ActionErrorCode, string> = {
   INVOICE_LIMIT_REACHED: "سقف صدور فاکتور پلن فعلی شما تکمیل شده است.",
   ENTITLEMENT_DATA_ERROR: "اطلاعات اشتراک در دسترس نیست. لطفاً با پشتیبانی تماس بگیرید.",
   FILE_STORAGE_NOT_CONFIGURED: "سرویس ذخیره‌سازی فایل در دسترس نیست.",
+  FILE_STORAGE_UPLOAD_FAILED: "بارگذاری فایل ناموفق بود؛ دوباره تلاش کنید.",
   INTERNAL_ERROR: "خطای غیرمنتظره‌ای رخ داد. لطفاً چند لحظه بعد دوباره تلاش کنید.",
 };
 

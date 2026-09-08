@@ -9,7 +9,7 @@ import {
   ForbiddenError,
   UnauthorizedError,
 } from "@/server/auth/requireSession";
-import { FILE_UPLOADS_ENABLED } from "@/server/storage/storageService";
+import { isFileUploadsEnabled } from "@/server/storage/storageService";
 import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -110,7 +110,7 @@ export default async function NewBusinessPage() {
         actions={backButton}
       />
 
-      <BusinessSettingsForm mode="create" imageUploadsEnabled={FILE_UPLOADS_ENABLED} />
+      <BusinessSettingsForm mode="create" imageUploadsEnabled={isFileUploadsEnabled()} />
     </div>
   );
 }
