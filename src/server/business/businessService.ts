@@ -183,29 +183,35 @@ const PROFILE_FIELD_KEYS = [
   "footerText",
 ] as const;
 
-type ProfileFieldsSource = Partial<
-  Record<(typeof PROFILE_FIELD_KEYS)[number], string | null>
->;
+type ProfileFieldName = (typeof PROFILE_FIELD_KEYS)[number];
+
+type ProfileFieldsSource = Partial<Record<ProfileFieldName, string | null>>;
 
 /**
- * Builds a `BusinessProfile` write payload from parsed input. Only *provided*
- * keys are included (Prisma would treat `undefined` as "not set" anyway, but
- * omitting absent keys keeps the write payloads — and their test assertions —
- * exact), and `businessName` always mirrors `Business.name`.
+ * A `businessProfile` write payload: `businessName` is always present (it
+ * mirrors `Business.name`) and only *provided* optional keys are included
+ * (Prisma would treat `undefined` as "not set" anyway, but omitting absent
+ * keys keeps the write payloads — and their test assertions — exact).
+ */
+type ProfileWriteData = { businessName: string } & Partial<Record<ProfileFieldName, string | null>>;
+
+/**
+ * Builds a `BusinessProfile` create payload from parsed input. Only *provided*
+ * keys are included, and `businessName` always mirrors `Business.name`.
  */
 function buildProfileCreateData(
   businessId: string,
   businessName: string,
   source: ProfileFieldsSource,
-): Record<string, string | null> & { businessId: string } {
+): ProfileWriteData & { businessId: string } {
   return { businessId, ...buildProfileUpdateData(businessName, source) };
 }
 
 function buildProfileUpdateData(
   businessName: string,
   source: ProfileFieldsSource,
-): Record<string, string | null> {
-  const data: Record<string, string | null> = { businessName };
+): ProfileWriteData {
+  const data: ProfileWriteData = { businessName };
   for (const key of PROFILE_FIELD_KEYS) {
     const value = source[key];
     if (value !== undefined) {
