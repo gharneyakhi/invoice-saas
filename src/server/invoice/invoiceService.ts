@@ -19,6 +19,7 @@ import {
   parseUpdateDraftInvoiceInput,
   type CreateDraftInvoiceInput,
 } from "@/server/invoice/schema";
+import { normalizeInvoiceCurrency } from "@/lib/currency";
 
 /**
  * Row shape of an invoice line item (mirrors `model InvoiceItem` in
@@ -62,6 +63,7 @@ export interface InvoiceSellerSnapshotRecord {
   sellerStampFileId: string | null;
   sellerSignatureFileId: string | null;
   primaryColor: string | null;
+  footerBackgroundColor: string | null;
   footerText: string | null;
 }
 
@@ -110,6 +112,8 @@ export interface InvoiceRecord {
   total: Decimal;
   paidAmount: Decimal;
   remainingAmount: Decimal;
+  /** Snapshotted at finalization from InvoiceSettings.currency; drafts stay null. */
+  currency: string | null;
   notes: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -1012,6 +1016,8 @@ export async function finalizeInvoice(
       throw new ValidationError("Cannot finalize an invoice with no line items");
     }
 
+    const lineItems = invoice.items as InvoiceItemRecord[];
+
     // 5. Verify customer references (if referenced)
     let customer: {
       id: string;
@@ -1047,7 +1053,7 @@ export async function finalizeInvoice(
     // 6. Verify product references (if referenced by line items)
     const productIds = Array.from(
       new Set(
-        invoice.items
+        lineItems
           .map((item) => item.productId)
           .filter((id): id is string => Boolean(id)),
       ),
@@ -1074,7 +1080,7 @@ export async function finalizeInvoice(
 
     // 7. Authoritative server-side recalculation of line items and invoice totals
     const calculationInput: InvoiceCalculationInput = {
-      items: invoice.items.map((item) => ({
+      items: lineItems.map((item) => ({
         unitPrice: item.unitPrice,
         quantity: item.quantity,
         discountPercent: item.discountPercent,
@@ -1145,6 +1151,7 @@ export async function finalizeInvoice(
         sellerStampFileId: profile?.sellerStampFileId ?? null,
         sellerSignatureFileId: profile?.sellerSignatureFileId ?? null,
         primaryColor: profile?.primaryColor ?? null,
+        footerBackgroundColor: profile?.footerBackgroundColor ?? null,
         footerText: profile?.footerText ?? null,
       },
     });
@@ -1170,8 +1177,8 @@ export async function finalizeInvoice(
       where: { invoiceId: invoice.id },
     });
 
-    const paidAmount = payments.reduce(
-      (acc, p) => acc.plus(new Decimal(p.amount)),
+    const paidAmount = (payments as Array<{ amount: Decimal.Value }>).reduce(
+      (acc: Decimal, p) => acc.plus(new Decimal(p.amount)),
       new Decimal(0),
     );
     const remainingAmount = calcResult.total.minus(paidAmount);
@@ -1183,8 +1190,8 @@ export async function finalizeInvoice(
     });
 
     // 13. Persist authoritative line item values
-    for (let i = 0; i < invoice.items.length; i++) {
-      const item = invoice.items[i]!;
+    for (let i = 0; i < lineItems.length; i++) {
+      const item = lineItems[i]!;
       const lineCalc = calcResult.items[i]!;
       await tx.invoiceItem.update({
         where: { id: item.id },
@@ -1216,6 +1223,7 @@ export async function finalizeInvoice(
         total: calcResult.total,
         paidAmount,
         remainingAmount,
+        currency: normalizeInvoiceCurrency(settings.currency),
         finalizedAt: now,
       },
     });

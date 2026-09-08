@@ -104,6 +104,7 @@ export interface BusinessProfileDTO {
   accountNumber: string | null;
   iban: string | null;
   primaryColor: string | null;
+  footerBackgroundColor: string | null;
   footerText: string | null;
   logo: BusinessImageRefDTO | null;
   sellerStamp: BusinessImageRefDTO | null;
@@ -150,6 +151,7 @@ export function toBusinessProfileDTO(
     accountNumber: row.accountNumber,
     iban: row.iban,
     primaryColor: row.primaryColor,
+    footerBackgroundColor: row.footerBackgroundColor,
     footerText: row.footerText,
     logo: images ? toBusinessImageRefDTO(images.logo) : null,
     sellerStamp: images ? toBusinessImageRefDTO(images.sellerStamp) : null,
@@ -295,6 +297,8 @@ export interface InvoiceDTO {
   total: string;
   paidAmount: string;
   remainingAmount: string;
+  /** Snapshotted at finalization; `null` on drafts (use InvoiceSettings). */
+  currency: string | null;
   notes: string | null;
   createdAt: string;
   updatedAt: string;
@@ -358,6 +362,7 @@ function toInvoiceBaseDTO(row: InvoiceRecord): InvoiceDTO {
     total: moneyToString(row.total),
     paidAmount: moneyToString(row.paidAmount),
     remainingAmount: moneyToString(row.remainingAmount),
+    currency: row.currency ?? null,
     notes: row.notes,
     createdAt: dateToIso(row.createdAt) ?? "",
     updatedAt: dateToIso(row.updatedAt) ?? "",

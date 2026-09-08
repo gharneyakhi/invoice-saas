@@ -137,6 +137,7 @@ function invoiceRow(overrides: Record<string, unknown> = {}) {
     total: new Decimal(INVOICE_TOTAL),
     paidAmount: new Decimal("0"),
     remainingAmount: new Decimal(INVOICE_TOTAL),
+    currency: "IRR",
     notes: null,
     createdAt: new Date("2026-03-01T00:00:00.000Z"),
     updatedAt: new Date("2026-03-01T00:00:00.000Z"),

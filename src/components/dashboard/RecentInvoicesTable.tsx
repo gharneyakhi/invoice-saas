@@ -23,14 +23,18 @@ import type { DashboardRecentInvoiceDTO } from "@/server/dashboard/dashboardServ
 export interface RecentInvoicesTableProps {
   invoices: DashboardRecentInvoiceDTO[];
   hasBusiness: boolean;
+  /** Live InvoiceSettings.currency for drafts without a snapshot. */
+  fallbackCurrency?: string;
   className?: string;
 }
 
 export function RecentInvoicesTable({
   invoices,
   hasBusiness,
+  fallbackCurrency = "IRR",
   className,
 }: RecentInvoicesTableProps) {
+  const currencyOf = (inv: DashboardRecentInvoiceDTO) => inv.currency ?? fallbackCurrency;
   return (
     <Card className={className}>
       <CardHeader className="p-5 pb-3">
@@ -130,10 +134,10 @@ export function RecentInvoicesTable({
                           {inv.dueDate ? formatPersianDateShort(inv.dueDate) : "—"}
                         </td>
                         <td className="py-3.5 px-4 font-semibold text-gray-900 font-sans">
-                          {formatCurrency(inv.total)}
+                          {formatCurrency(inv.total, currencyOf(inv))}
                         </td>
                         <td className="py-3.5 px-4 text-gray-600 font-sans">
-                          {formatCurrency(inv.remainingAmount)}
+                          {formatCurrency(inv.remainingAmount, currencyOf(inv))}
                         </td>
                         <td className="py-3.5 px-5 text-left">
                           <Link href={`/dashboard/invoices`}>
@@ -178,13 +182,13 @@ export function RecentInvoicesTable({
                       <div>
                         <span className="text-gray-400 block text-[11px]">مبلغ کل:</span>
                         <span className="font-bold text-gray-900 font-sans">
-                          {formatCurrency(inv.total)}
+                          {formatCurrency(inv.total, currencyOf(inv))}
                         </span>
                       </div>
                       <div>
                         <span className="text-gray-400 block text-[11px]">مانده:</span>
                         <span className="font-medium text-gray-700 font-sans">
-                          {formatCurrency(inv.remainingAmount)}
+                          {formatCurrency(inv.remainingAmount, currencyOf(inv))}
                         </span>
                       </div>
                       <div>

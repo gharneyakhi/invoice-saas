@@ -30,6 +30,7 @@ export interface BusinessSettingsFormFields {
   accountNumber: string;
   iban: string;
   primaryColor: string;
+  footerBackgroundColor: string;
   footerText: string;
   defaultVatPercent: string;
   currency: string;
@@ -126,16 +127,20 @@ const ibanField = z.preprocess(
     .default(""),
 );
 
-const primaryColorField = z.preprocess(
-  (value) => (typeof value === "string" ? value.trim().toLowerCase() : value),
-  z
-    .string({ invalid_type_error: invalid("رنگ برند") })
-    .refine((value) => value === "" || /^#[0-9a-f]{6}$/.test(value), {
-      message: "رنگ برند باید کد هگز معتبر باشد (مثال: #2563eb)",
-    })
-    .optional()
-    .default(""),
-);
+const hexColorField = (label: string) =>
+  z.preprocess(
+    (value) => (typeof value === "string" ? value.trim().toLowerCase() : value),
+    z
+      .string({ invalid_type_error: invalid(label) })
+      .refine((value) => value === "" || /^#[0-9a-f]{6}$/.test(value), {
+        message: `${label} باید کد هگز معتبر باشد (مثال: #2563eb)`,
+      })
+      .optional()
+      .default(""),
+  );
+
+const primaryColorField = hexColorField("رنگ سازمانی");
+const footerBackgroundColorField = hexColorField("رنگ پس‌زمینه پاورقی");
 
 const vatPercentField = z.preprocess(
   (value) => {
@@ -156,8 +161,8 @@ const currencyField = z.preprocess(
   (value) => (typeof value === "string" ? value.trim().toUpperCase() : value),
   z
     .string({ required_error: required("واحد پول"), invalid_type_error: invalid("واحد پول") })
-    .refine((value) => /^[A-Z]{3}$/.test(value), {
-      message: "واحد پول باید کد ۳ حرفی باشد (مثال: IRR)",
+    .refine((value) => value === "IRR" || value === "IRT", {
+      message: "واحد پول باید ریال یا تومان باشد",
     })
     .optional()
     .default("IRR"),
@@ -186,6 +191,7 @@ export const businessSettingsFormSchema = z.object({
   accountNumber: accountNumberField,
   iban: ibanField,
   primaryColor: primaryColorField,
+  footerBackgroundColor: footerBackgroundColorField,
   footerText: optionalText("متن پاورقی فاکتور", 500),
   defaultVatPercent: vatPercentField,
   currency: currencyField,

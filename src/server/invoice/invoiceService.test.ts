@@ -187,6 +187,7 @@ function businessProfileRow(overrides = {}) {
     sellerStampFileId: "file-stamp-1",
     sellerSignatureFileId: "file-sig-1",
     primaryColor: "#0055ff",
+    footerBackgroundColor: "#111827",
     footerText: "از خرید شما سپاسگزاریم",
     createdAt: new Date("2026-01-01T00:00:00.000Z"),
     updatedAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -266,6 +267,7 @@ function draftInvoiceRow(overrides = {}) {
     total: new Decimal("186390"),
     paidAmount: new Decimal("0"),
     remainingAmount: new Decimal("186390"),
+    currency: null,
     notes: "پیش‌نویس فاکتور رسمی",
     createdAt: new Date("2026-03-15T00:00:00.000Z"),
     updatedAt: new Date("2026-03-15T00:00:00.000Z"),
@@ -936,6 +938,7 @@ describe("finalizeInvoice", () => {
           total: new Decimal("186390"),
           paidAmount: new Decimal("0"),
           remainingAmount: new Decimal("186390"),
+          currency: "IRR",
           finalizedAt: NOW,
         }),
       });
@@ -943,6 +946,36 @@ describe("finalizeInvoice", () => {
       expect(result.status).toBe("PENDING_PAYMENT");
       expect(result.invoiceNumber).toBe("INV-101");
       expect(result.finalizedAt).toEqual(NOW);
+    });
+
+    it("snapshots InvoiceSettings.currency onto the finalized invoice (IRT survives later settings changes)", async () => {
+      const { finalizeInvoice } = await import("./invoiceService");
+
+      const draft = draftInvoiceRow({ customerId: null });
+      prismaMock.invoice.findUnique
+        .mockResolvedValueOnce(draft)
+        .mockResolvedValueOnce({
+          ...draft,
+          status: "PENDING_PAYMENT",
+          invoiceNumber: "INV-101",
+          currency: "IRT",
+          finalizedAt: NOW,
+        });
+      prismaMock.product.findMany.mockResolvedValue([productRow()]);
+      prismaMock.invoiceSettings.update.mockResolvedValue({
+        id: "set-1",
+        invoicePrefix: "INV-",
+        nextInvoiceNumber: 102,
+        currency: "IRT",
+      });
+
+      await finalizeInvoice(draft.id, { now: NOW });
+
+      expect(prismaMock.invoice.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ currency: "IRT" }),
+        }),
+      );
     });
 
     it("accepts options object signature { invoiceId, now }", async () => {
@@ -1643,6 +1676,7 @@ describe("finalizeInvoice", () => {
           "sellerStampFileId",
           "sellerSignatureFileId",
           "primaryColor",
+          "footerBackgroundColor",
           "footerText",
         ]),
       );

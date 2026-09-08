@@ -2,8 +2,11 @@ import * as React from "react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { listBusinesses } from "@/server/business/businessService";
-import { getInvoice } from "@/server/invoice/invoiceService";
-import { toInvoiceDetailDTO } from "@/server/actions/dto";
+import { getInvoice, getInvoiceSettings } from "@/server/invoice/invoiceService";
+import { listInvoicePayments } from "@/server/payment/paymentService";
+import { toInvoiceDetailDTO, toInvoicePaymentDTO } from "@/server/actions/dto";
+import { InvoicePaymentPanel } from "@/components/invoice/InvoicePaymentPanel";
+import { invoiceCurrencyLabel, resolveInvoiceDisplayCurrency } from "@/lib/currency";
 import { prisma } from "@/lib/prisma";
 import {
   ForbiddenError,
@@ -211,6 +214,17 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
     }
   }
 
+  const [settings, paymentRecords] = await Promise.all([
+    getInvoiceSettings(business.id),
+    isDraft ? Promise.resolve([]) : listInvoicePayments(record.id),
+  ]);
+  const currency = resolveInvoiceDisplayCurrency({
+    isDraft,
+    invoiceCurrency: record.currency,
+    settingsCurrency: settings?.currency,
+  });
+  const payments = paymentRecords.map(toInvoicePaymentDTO);
+
   const invoice = toInvoiceDetailDTO(record);
   const statusMeta = formatInvoiceStatus(invoice.status);
 
@@ -224,7 +238,6 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
     ? liveCustomer
     : (record.customerSnapshot ?? null);
 
-  const sellerName = sellerInfo?.businessName ?? business.name;
   const customerName = customerInfo?.name ?? null;
 
   return (
@@ -302,6 +315,7 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
                 label="تاریخ نهایی‌سازی"
                 value={invoice.finalizedAt ? formatPersianDate(invoice.finalizedAt) : "—"}
               />
+              <Field label="واحد پول" value={invoiceCurrencyLabel(currency)} />
             </CardContent>
           </Card>
 
@@ -379,13 +393,13 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
                             </td>
                             <td className="px-4 py-3 font-sans text-gray-600">{item.unit ?? "—"}</td>
                             <td className="px-4 py-3 font-sans text-gray-600">
-                              {formatCurrency(item.unitPrice)}
+                              {formatCurrency(item.unitPrice, currency)}
                             </td>
                             <td className="px-4 py-3 font-sans text-gray-600">
-                              {formatCurrency(item.discountAmount)}
+                              {formatCurrency(item.discountAmount, currency)}
                             </td>
                             <td className="px-5 py-3 font-sans font-semibold text-gray-900">
-                              {formatCurrency(item.total)}
+                              {formatCurrency(item.total, currency)}
                             </td>
                           </tr>
                         ))}
@@ -403,9 +417,9 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
                             value={`${formatPersianNumber(item.quantity)} ${item.unit ?? ""}`}
                           />
                           <Field label="واحد" value={item.unit ?? "—"} />
-                          <Field label="قیمت واحد" value={formatCurrency(item.unitPrice)} />
-                          <Field label="تخفیف" value={formatCurrency(item.discountAmount)} />
-                          <Field label="جمع" value={formatCurrency(item.total)} />
+                          <Field label="قیمت واحد" value={formatCurrency(item.unitPrice, currency)} />
+                          <Field label="تخفیف" value={formatCurrency(item.discountAmount, currency)} />
+                          <Field label="جمع" value={formatCurrency(item.total, currency)} />
                         </div>
                       </li>
                     ))}
@@ -416,42 +430,56 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
           </Card>
         </div>
 
-        {/* Financial summary sidebar */}
-        <Card className="h-fit">
-          <CardHeader>
-            <CardTitle className="text-sm">خلاصه مالی</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2.5 text-xs">
-            <div className="flex items-center justify-between">
-              <span className="text-gray-500">جمع اقلام</span>
-              <span className="font-sans text-gray-800">{formatCurrency(invoice.subtotal)}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-gray-500">تخفیف اقلام</span>
-              <span className="font-sans text-gray-800">{formatCurrency(invoice.itemDiscountAmount)}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-gray-500">تخفیف کلی</span>
-              <span className="font-sans text-gray-800">{formatCurrency(invoice.globalDiscountAmount)}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-gray-500">مالیات بر ارزش افزوده</span>
-              <span className="font-sans text-gray-800">{formatCurrency(invoice.taxAmount)}</span>
-            </div>
-            <div className="flex items-center justify-between border-t border-gray-100 pt-2.5">
-              <span className="font-semibold text-gray-700">مبلغ کل</span>
-              <span className="font-sans text-sm font-bold text-gray-900">{formatCurrency(invoice.total)}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-gray-500">پرداخت شده</span>
-              <span className="font-sans text-emerald-700">{formatCurrency(invoice.paidAmount)}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-gray-500">مانده</span>
-              <span className="font-sans font-semibold text-gray-900">{formatCurrency(invoice.remainingAmount)}</span>
-            </div>
-          </CardContent>
-        </Card>
+        <div className="space-y-6">
+          <Card className="h-fit">
+            <CardHeader>
+              <CardTitle className="text-sm">خلاصه مالی</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2.5 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">جمع اقلام</span>
+                <span className="font-sans text-gray-800">{formatCurrency(invoice.subtotal, currency)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">تخفیف اقلام</span>
+                <span className="font-sans text-gray-800">{formatCurrency(invoice.itemDiscountAmount, currency)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">تخفیف کلی</span>
+                <span className="font-sans text-gray-800">{formatCurrency(invoice.globalDiscountAmount, currency)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">مالیات بر ارزش افزوده</span>
+                <span className="font-sans text-gray-800">{formatCurrency(invoice.taxAmount, currency)}</span>
+              </div>
+              <div className="flex items-center justify-between border-t border-gray-100 pt-2.5">
+                <span className="font-semibold text-gray-700">مبلغ کل</span>
+                <span className="font-sans text-sm font-bold text-gray-900">{formatCurrency(invoice.total, currency)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">پرداخت شده</span>
+                <span className="font-sans text-emerald-700">{formatCurrency(invoice.paidAmount, currency)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">مانده</span>
+                <span className="font-sans font-semibold text-gray-900">{formatCurrency(invoice.remainingAmount, currency)}</span>
+              </div>
+            </CardContent>
+          </Card>
+
+          {!isDraft && (
+            <InvoicePaymentPanel
+              invoiceId={record.id}
+              currency={currency}
+              total={invoice.total}
+              paidAmount={invoice.paidAmount}
+              remainingAmount={invoice.remainingAmount}
+              status={invoice.status}
+              payments={payments}
+              readOnly={isCancelled}
+            />
+          )}
+        </div>
       </div>
 
       {/* Notes / Footer */}

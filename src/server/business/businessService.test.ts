@@ -167,6 +167,7 @@ function profileRow(overrides: Partial<Record<string, unknown>> = {}) {
     sellerStampFileId: null,
     sellerSignatureFileId: null,
     primaryColor: null,
+    footerBackgroundColor: null,
     footerText: null,
     createdAt: new Date("2026-01-01T00:00:00.000Z"),
     updatedAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -896,6 +897,7 @@ describe("createBusiness (profile fields)", () => {
       cardNumber: "6104337812345678",
       iban: "IR017000000001234567890123",
       primaryColor: "#1e64ff",
+      footerBackgroundColor: "#111827",
       footerText: "سپاس از خرید شما",
     });
 
@@ -909,6 +911,7 @@ describe("createBusiness (profile fields)", () => {
         cardNumber: "6104337812345678",
         iban: "IR017000000001234567890123",
         primaryColor: "#1e64ff",
+        footerBackgroundColor: "#111827",
         footerText: "سپاس از خرید شما",
       },
     });

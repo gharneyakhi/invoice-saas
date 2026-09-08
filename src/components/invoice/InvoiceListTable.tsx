@@ -26,6 +26,8 @@ import type { InvoiceListRowDTO } from "@/server/actions/dto";
 
 export interface InvoiceListTableProps {
   rows: InvoiceListRowDTO[];
+  /** Live InvoiceSettings.currency — used for drafts that have no snapshot yet. */
+  fallbackCurrency?: string;
 }
 
 function isDraft(row: InvoiceListRowDTO): boolean {
@@ -64,7 +66,9 @@ function RowAction({ row }: { row: InvoiceListRowDTO }) {
   );
 }
 
-export function InvoiceListTable({ rows }: InvoiceListTableProps) {
+export function InvoiceListTable({ rows, fallbackCurrency = "IRR" }: InvoiceListTableProps) {
+  const currencyOf = (row: InvoiceListRowDTO) => row.currency ?? fallbackCurrency;
+
   return (
     <>
       {/* Desktop */}
@@ -106,10 +110,10 @@ export function InvoiceListTable({ rows }: InvoiceListTableProps) {
                     {row.dueDate ? formatPersianDateShort(row.dueDate) : "—"}
                   </td>
                   <td className="px-4 py-3.5 font-sans font-semibold text-gray-900">
-                    {formatCurrency(row.total)}
+                    {formatCurrency(row.total, currencyOf(row))}
                   </td>
                   <td className="px-4 py-3.5 font-sans text-gray-600">
-                    {formatCurrency(row.remainingAmount)}
+                    {formatCurrency(row.remainingAmount, currencyOf(row))}
                   </td>
                   <td className="px-5 py-3.5 text-left">
                     <RowAction row={row} />
@@ -145,13 +149,13 @@ export function InvoiceListTable({ rows }: InvoiceListTableProps) {
                 <div>
                   <span className="block text-[11px] text-gray-400">مبلغ کل</span>
                   <span className="font-sans font-bold text-gray-900">
-                    {formatCurrency(row.total)}
+                    {formatCurrency(row.total, currencyOf(row))}
                   </span>
                 </div>
                 <div>
                   <span className="block text-[11px] text-gray-400">مانده</span>
                   <span className="font-sans font-medium text-gray-700">
-                    {formatCurrency(row.remainingAmount)}
+                    {formatCurrency(row.remainingAmount, currencyOf(row))}
                   </span>
                 </div>
                 <div>

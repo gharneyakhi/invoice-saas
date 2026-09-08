@@ -247,7 +247,7 @@ export default async function BusinessesPage() {
                       <span
                         className="mt-0.5 h-4 w-4 shrink-0 rounded-full border border-gray-200"
                         style={{ backgroundColor: profile.primaryColor }}
-                        title={`رنگ برند: ${profile.primaryColor}`}
+                        title={`رنگ سازمانی: ${profile.primaryColor}`}
                       />
                     )}
                   </div>

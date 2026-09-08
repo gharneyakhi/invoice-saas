@@ -18,6 +18,11 @@
  *   never allocates invoice numbers and never consumes quota — this module
  *   performs no writes of any kind.
  *
+ * The display model itself is NOT built here: the pure, dependency-free
+ * builder lives in `@/lib/invoice-preview-model` so the editor's LIVE preview
+ * (current, unsaved form state) and this server route produce exactly the same
+ * document model — one visual invoice language, two data sources.
+ *
  * Authorization is the existing server-side chain: `requireBusinessOwnership`
  * (session-derived account vs the Business row) proves the business is the
  * caller's, `getInvoice` proves the invoice belongs to exactly that business
@@ -32,295 +37,45 @@
  */
 
 import type {
-  InvoiceCustomerSnapshotRecord,
   InvoiceRecord,
   InvoiceSellerSnapshotRecord,
 } from "@/server/invoice/invoiceService";
-import { getInvoice } from "@/server/invoice/invoiceService";
+import { getInvoice, getInvoiceSettings } from "@/server/invoice/invoiceService";
+import { normalizeInvoiceCurrency, resolveInvoiceDisplayCurrency } from "@/lib/currency";
 import { requireBusinessOwnership } from "@/server/auth/requireBusinessOwnership";
-import { ForbiddenError, NotFoundError } from "@/server/auth/requireSession";
+import { NotFoundError } from "@/server/auth/requireSession";
 import { prisma } from "@/lib/prisma";
 import { resolveFilePublicUrl } from "@/server/storage/storageService";
-import { toInvoiceDetailDTO, type InvoiceDetailDTO } from "@/server/actions/dto";
+import {
+  buildInvoicePreviewModel,
+  previewSellerSourceKind,
+  type InvoicePreviewModel,
+  type PreviewCustomerSource,
+  type PreviewImages,
+  type PreviewProfileSource,
+} from "@/lib/invoice-preview-model";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/** One resolved profile/snapshot image: its file id and display URL (if any). */
-export interface InvoicePreviewImage {
-  fileId: string;
-  url: string | null;
-}
-
-/** Seller block of the preview document. */
-export interface InvoicePreviewSeller {
-  /** Where the values came from — SNAPSHOT for finalized, PROFILE for drafts. */
-  source: "SNAPSHOT" | "PROFILE";
-  businessName: string;
-  slogan: string | null;
-  ownerName: string | null;
-  address: string | null;
-  email: string | null;
-  mobile: string | null;
-  landline: string | null;
-  cardNumber: string | null;
-  accountNumber: string | null;
-  iban: string | null;
-  primaryColor: string | null;
-  footerText: string | null;
-  logo: InvoicePreviewImage | null;
-  sellerStamp: InvoicePreviewImage | null;
-  sellerSignature: InvoicePreviewImage | null;
-}
-
-/** Customer block of the preview document. */
-export interface InvoicePreviewCustomer {
-  name: string;
-  mobile: string | null;
-  phone: string | null;
-  email: string | null;
-  address: string | null;
-  nationalId: string | null;
-  economicCode: string | null;
-}
-
-/** Display-ready payload for the preview route / document component. */
-export interface InvoicePreviewModel {
-  invoice: InvoiceDetailDTO;
-  businessId: string;
-  /** DRAFT while editable, FINALIZED once issued/sent/paid, CANCELLED for history. */
-  lifecycle: "DRAFT" | "FINALIZED" | "CANCELLED";
-  isDraft: boolean;
-  /**
-   * Official invoice number for finalized rows; `null` for drafts (a draft
-   * carries a `DRAFT-<uuid>` placeholder that must never appear on a
-   * printable document — the UI shows "—" instead).
-   */
-  officialNumber: string | null;
-  /** Seller block (snapshot for finalized, current profile for drafts). */
-  seller: InvoicePreviewSeller | null;
-  /** Customer block (snapshot for finalized, live row for drafts). */
-  customer: InvoicePreviewCustomer | null;
-  /** Currency code from InvoiceSettings (default "IRR"); not snapshotted. */
-  currency: string;
-}
-
-/** Minimal structural shape of a current `BusinessProfile` row (draft source). */
-export interface PreviewProfileSource {
-  businessName: string;
-  slogan: string | null;
-  ownerName: string | null;
-  address: string | null;
-  email: string | null;
-  mobile: string | null;
-  landline: string | null;
-  cardNumber: string | null;
-  accountNumber: string | null;
-  iban: string | null;
-  logoFileId: string | null;
-  sellerStampFileId: string | null;
-  sellerSignatureFileId: string | null;
-  primaryColor: string | null;
-  footerText: string | null;
-}
-
-/** Minimal structural shape of a live `Customer` row (draft source). */
-export interface PreviewCustomerSource {
-  name: string;
-  mobile: string | null;
-  phone: string | null;
-  email: string | null;
-  address: string | null;
-  nationalId: string | null;
-  economicCode: string | null;
-}
-
-/** File ids + resolved urls for the three business images. */
-export interface PreviewImages {
-  logo: { fileId: string; url: string | null } | null;
-  sellerStamp: { fileId: string; url: string | null } | null;
-  sellerSignature: { fileId: string; url: string | null } | null;
-}
-
-export type PreviewLifecycle = InvoicePreviewModel["lifecycle"];
-
-/** Seller source of an invoice row: snapshot when one exists, else profile. */
-export type PreviewSellerSourceKind = "SNAPSHOT" | "PROFILE";
-
-export function previewLifecycle(status: string, finalizedAt: Date | null): PreviewLifecycle {
-  if (status === "DRAFT") return "DRAFT";
-  if (status === "CANCELLED") return "CANCELLED";
-  if (finalizedAt !== null && status !== "DRAFT") return "FINALIZED";
-  // A finalized row always carries finalizedAt; anything else is defensive.
-  return status === "CANCELLED" ? "CANCELLED" : finalizedAt !== null ? "FINALIZED" : "DRAFT";
-}
-
-/**
- * Which seller data source the preview must use for a given invoice:
- * finalized / cancelled rows read their immutable snapshot; drafts (which
- * have no snapshot yet) read the current BusinessProfile.
- */
-export function previewSellerSourceKind(invoice: Pick<InvoiceRecord, "status" | "finalizedAt" | "sellerSnapshot">): PreviewSellerSourceKind {
-  return invoice.sellerSnapshot ? "SNAPSHOT" : "PROFILE";
-}
-
-// ---------------------------------------------------------------------------
-// Pure model builder (unit-testable, no DB)
-// ---------------------------------------------------------------------------
-
-export interface BuildInvoicePreviewModelInput {
-  invoice: InvoiceRecord;
-  /** Business.name — used only as the last-resort display name for drafts. */
-  fallbackBusinessName: string;
-  /** Current BusinessProfile row (draft seller source; ignored for finalized). */
-  currentProfile: PreviewProfileSource | null;
-  /** Live Customer row (draft customer source; ignored for finalized). */
-  currentCustomer: PreviewCustomerSource | null;
-  /** Resolved image URLs for whichever seller source applies. */
-  images: PreviewImages;
-  /** Currency label from InvoiceSettings ("IRR" default). */
-  currency: string;
-}
-
-function blankToNull(value: string | null | undefined): string | null {
-  if (value === null || value === undefined) return null;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
-function toImage(ref: { fileId: string; url: string | null } | null): InvoicePreviewImage | null {
-  return ref ? { fileId: ref.fileId, url: ref.url } : null;
-}
-
-/**
- * Builds the display model for the preview document.
- *
- * Data-source law (the reason this milestone exists):
- *   - DRAFT  → seller = current BusinessProfile (falling back to the business
- *              name alone when no profile row exists yet), customer = the
- *              live Customer row;
- *   - FINALIZED / CANCELLED → seller = InvoiceSellerSnapshot and customer =
- *              InvoiceCustomerSnapshot, verbatim. If a later profile edit
- *              changed the name/logo/address/bank details or the customer
- *              row changed, this model still shows the finalization-time
- *              values (covered by the snapshot-regression tests).
- *
- * Everything monetary is carried by the shared `toInvoiceDetailDTO` mapping
- * (Decimal → exact string); the UI never performs financial math.
- */
-export function buildInvoicePreviewModel(input: BuildInvoicePreviewModelInput): InvoicePreviewModel {
-  const { invoice, fallbackBusinessName, currentProfile, currentCustomer, images, currency } = input;
-  const sellerSourceKind = previewSellerSourceKind(invoice);
-  const isDraft = invoice.status === "DRAFT";
-
-  let seller: InvoicePreviewSeller | null = null;
-
-  if (sellerSourceKind === "SNAPSHOT" && invoice.sellerSnapshot) {
-    const s = invoice.sellerSnapshot as InvoiceSellerSnapshotRecord;
-    seller = {
-      source: "SNAPSHOT",
-      businessName: s.businessName,
-      slogan: blankToNull(s.slogan),
-      ownerName: blankToNull(s.ownerName),
-      address: blankToNull(s.address),
-      email: blankToNull(s.email),
-      mobile: blankToNull(s.mobile),
-      landline: blankToNull(s.landline),
-      cardNumber: blankToNull(s.cardNumber),
-      accountNumber: blankToNull(s.accountNumber),
-      iban: blankToNull(s.iban),
-      primaryColor: blankToNull(s.primaryColor),
-      footerText: blankToNull(s.footerText),
-      logo: images.logo ? toImage(images.logo) : null,
-      sellerStamp: images.sellerStamp ? toImage(images.sellerStamp) : null,
-      sellerSignature: images.sellerSignature ? toImage(images.sellerSignature) : null,
-    };
-  } else if (isDraft && currentProfile) {
-    seller = {
-      source: "PROFILE",
-      businessName: currentProfile.businessName || fallbackBusinessName,
-      slogan: blankToNull(currentProfile.slogan),
-      ownerName: blankToNull(currentProfile.ownerName),
-      address: blankToNull(currentProfile.address),
-      email: blankToNull(currentProfile.email),
-      mobile: blankToNull(currentProfile.mobile),
-      landline: blankToNull(currentProfile.landline),
-      cardNumber: blankToNull(currentProfile.cardNumber),
-      accountNumber: blankToNull(currentProfile.accountNumber),
-      iban: blankToNull(currentProfile.iban),
-      primaryColor: blankToNull(currentProfile.primaryColor),
-      footerText: blankToNull(currentProfile.footerText),
-      logo: images.logo ? toImage(images.logo) : null,
-      sellerStamp: images.sellerStamp ? toImage(images.sellerStamp) : null,
-      sellerSignature: images.sellerSignature ? toImage(images.sellerSignature) : null,
-    };
-  } else if (isDraft && !currentProfile) {
-    // No profile row yet — a valid state for a brand-new business. The
-    // letterhead still shows the registered business name and nothing else
-    // (no fake contact/bank details are invented).
-    seller = {
-      source: "PROFILE",
-      businessName: fallbackBusinessName,
-      slogan: null,
-      ownerName: null,
-      address: null,
-      email: null,
-      mobile: null,
-      landline: null,
-      cardNumber: null,
-      accountNumber: null,
-      iban: null,
-      primaryColor: null,
-      footerText: null,
-      logo: null,
-      sellerStamp: null,
-      sellerSignature: null,
-    };
-  }
-  // Defensive: a non-draft row without a snapshot has no trustworthy seller
-  // data — seller stays null and the UI falls back to plain business name.
-
-  let customer: InvoicePreviewCustomer | null = null;
-  if (isDraft) {
-    if (currentCustomer) {
-      customer = {
-        name: currentCustomer.name,
-        mobile: blankToNull(currentCustomer.mobile),
-        phone: blankToNull(currentCustomer.phone),
-        email: blankToNull(currentCustomer.email),
-        address: blankToNull(currentCustomer.address),
-        nationalId: blankToNull(currentCustomer.nationalId),
-        economicCode: blankToNull(currentCustomer.economicCode),
-      };
-    }
-  } else if (invoice.customerSnapshot) {
-    const c = invoice.customerSnapshot as InvoiceCustomerSnapshotRecord;
-    customer = {
-      name: c.name,
-      mobile: blankToNull(c.mobile),
-      phone: blankToNull(c.phone),
-      email: blankToNull(c.email),
-      address: blankToNull(c.address),
-      nationalId: blankToNull(c.nationalId),
-      economicCode: blankToNull(c.economicCode),
-    };
-  }
-
-  const lifecycle = previewLifecycle(invoice.status, invoice.finalizedAt);
-  const isDraftInvoice = lifecycle === "DRAFT";
-
-  return {
-    invoice: toInvoiceDetailDTO(invoice),
-    businessId: invoice.businessId,
-    lifecycle,
-    isDraft: isDraftInvoice,
-    officialNumber: isDraftInvoice ? null : invoice.invoiceNumber,
-    seller,
-    customer,
-    currency: currency || "IRR",
-  };
-}
+// The preview model (types + pure builder) is owned by `@/lib/invoice-preview-model`
+// and re-exported here unchanged, so every existing consumer of this module —
+// `InvoicePreviewDocument`, the preview route, the invoice editor and the
+// model tests — keeps importing from the same place.
+export {
+  buildInvoicePreviewModel,
+  previewLifecycle,
+  previewSellerSourceKind,
+} from "@/lib/invoice-preview-model";
+export type {
+  BuildInvoicePreviewModelInput,
+  InvoicePreviewCustomer,
+  InvoicePreviewImage,
+  InvoicePreviewModel,
+  InvoicePreviewSeller,
+  PreviewCustomerSource,
+  PreviewImages,
+  PreviewLifecycle,
+  PreviewProfileSource,
+  PreviewSellerSourceKind,
+} from "@/lib/invoice-preview-model";
 
 // ---------------------------------------------------------------------------
 // Server loader
@@ -373,8 +128,8 @@ async function resolveImages(
  *
  * Authorization (identical contract to `getInvoice`, which this function
  * delegates to): authenticated session required; the business must belong to
- * the session account (`requireBusinessOwnership`); the invoice must belong
- * to exactly that business. Missing rows → NotFoundError, foreign rows →
+ * the session account (`requireBusinessOwnership`); the invoice must belong to
+ * exactly that business. Missing rows → NotFoundError, foreign rows →
  * ForbiddenError. Reads stay available for archived businesses and cancelled
  * invoices so history remains viewable — the route decides reachability.
  *
@@ -413,9 +168,16 @@ export async function getInvoicePreviewData(businessId: string, invoiceId: unkno
     }
   }
 
-  const settings = (await prisma.invoiceSettings.findUnique({
-    where: { businessId: owned.id },
-  })) as unknown as { currency: string | null } | null;
+  // Drafts (and legacy finalized rows with a null snapshot) read the live
+  // InvoiceSettings.currency. Finalized invoices with a stored snapshot
+  // never consult settings — a later unit change cannot rewrite history.
+  let settingsCurrency: string | null = null;
+  if (isDraft || !record.currency) {
+    const settings = (await prisma.invoiceSettings.findUnique({
+      where: { businessId: owned.id },
+    })) as unknown as { currency: string | null } | null;
+    settingsCurrency = settings?.currency ?? null;
+  }
 
   // Image source: the snapshot (finalized) or the current profile (draft).
   const imageSource =
@@ -431,6 +193,70 @@ export async function getInvoicePreviewData(businessId: string, invoiceId: unkno
     currentProfile: profile,
     currentCustomer: customer,
     images,
-    currency: settings?.currency ?? "IRR",
+    currency: resolveInvoiceDisplayCurrency({
+      isDraft,
+      invoiceCurrency: record.currency,
+      settingsCurrency,
+    }),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Draft editor live-preview context
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything the invoice editor needs to render a live preview of a DRAFT
+ * that does not exist (or is not saved) yet.
+ *
+ * The editor owns the invoice content (unsaved form state), so the server only
+ * supplies the *seller* half of the document — the current `BusinessProfile`
+ * with its branding assets already resolved to public URLs — plus the
+ * business currency. The customer half comes from the live customer rows the
+ * editor already has.
+ *
+ * This is exactly the draft branch of `getInvoicePreviewData`'s data law,
+ * lifted out of the per-invoice lookup: no invoice row is read, no snapshot is
+ * consulted (drafts have none), nothing is written, no quota is touched and no
+ * invoice number is allocated.
+ */
+export interface DraftPreviewContext {
+  businessId: string;
+  /** `Business.name` — last-resort letterhead name when no profile exists. */
+  fallbackBusinessName: string;
+  /** Current BusinessProfile row, or null when the business has no profile yet. */
+  currentProfile: PreviewProfileSource | null;
+  /** Resolved logo / stamp / signature urls for the current profile. */
+  images: PreviewImages;
+  /** InvoiceSettings currency ("IRR" when unset). */
+  currency: string;
+}
+
+export async function getDraftPreviewContext(businessId: string): Promise<DraftPreviewContext> {
+  const owned = await requireBusinessOwnership(businessId);
+
+  const [profile, settings] = await Promise.all([
+    prisma.businessProfile.findUnique({
+      where: { businessId: owned.id },
+    }) as unknown as Promise<PreviewProfileSource | null>,
+    getInvoiceSettings(owned.id),
+  ]);
+
+  // Branding must never break the editor: a storage/file-ledger hiccup only
+  // means the document renders without that asset (urls → null), never a
+  // synthetic URL and never an error page.
+  let images: PreviewImages = { logo: null, sellerStamp: null, sellerSignature: null };
+  try {
+    images = await resolveImages(owned.id, profile);
+  } catch (error) {
+    console.warn("[invoice-preview] branding assets unavailable", error);
+  }
+
+  return {
+    businessId: owned.id,
+    fallbackBusinessName: owned.name,
+    currentProfile: profile ?? null,
+    images,
+    currency: normalizeInvoiceCurrency(settings?.currency),
+  };
 }

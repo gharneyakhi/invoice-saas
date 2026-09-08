@@ -37,12 +37,14 @@ describe("createBusinessSchema", () => {
       accountNumber: "0123456789",
       iban: "ir017000000001234567890123", // lowercase prefix, 24-digit body
       primaryColor: "  #1E64FF  ",
+      footerBackgroundColor: "  #111827  ",
       footerText: "با تشکر از خرید شما",
     });
     expect(parsed.email).toBe("INFO@Example.COM");
     expect(parsed.mobile).toBe("09123456789");
     expect(parsed.cardNumber).toBe("6104337812345678");
     expect(parsed.primaryColor).toBe("#1e64ff");
+    expect(parsed.footerBackgroundColor).toBe("#111827");
   });
 
   it("normalizes empty strings to null (not set)", () => {
@@ -96,6 +98,9 @@ describe("createBusinessSchema", () => {
     );
     expect(() => parseCreateBusinessInput({ name: "x", primaryColor: "#12345" })).toThrow(
       /primaryColor/,
+    );
+    expect(() => parseCreateBusinessInput({ name: "x", footerBackgroundColor: "red" })).toThrow(
+      /footerBackgroundColor/,
     );
     expect(() => parseCreateBusinessInput({ name: "x", slogan: "x".repeat(201) })).toThrow(
       /slogan/,
@@ -178,8 +183,19 @@ describe("updateBusinessSettingsSchema", () => {
       parseUpdateBusinessSettingsInput({ name: "x", invoiceSettings: { currency: "RIAL" } }),
     ).toThrow(ValidationError);
     expect(() =>
+      parseUpdateBusinessSettingsInput({ name: "x", invoiceSettings: { currency: "USD" } }),
+    ).toThrow(ValidationError);
+    expect(() =>
       parseUpdateBusinessSettingsInput({ name: "x", invoiceSettings: { invoicePrefix: "a b" } }),
     ).toThrow(ValidationError);
+  });
+
+  it("accepts IRT (تومان) as the invoice unit", () => {
+    const parsed = updateBusinessSettingsSchema.parse({
+      name: "x",
+      invoiceSettings: { currency: "irt" },
+    });
+    expect(parsed.invoiceSettings?.currency).toBe("IRT");
   });
 
   it("normalizes an empty invoice prefix to null (clears the prefix)", () => {

@@ -4,6 +4,8 @@ import { listBusinesses } from "@/server/business/businessService";
 import { listCustomers } from "@/server/customer/customerService";
 import { listProducts } from "@/server/product/productService";
 import { getInvoice, getInvoiceSettings } from "@/server/invoice/invoiceService";
+import { getDraftPreviewContext } from "@/server/invoice/previewService";
+import type { LivePreviewBrandingContext } from "@/lib/invoice-live-preview";
 import {
   toCustomerDTO,
   toInvoiceDetailDTO,
@@ -34,6 +36,12 @@ import { InvoiceEditor } from "@/components/invoice/InvoiceEditor";
  * `?invoiceId=<id>` re-opens an existing DRAFT (e.g. after a page refresh);
  * finalized/cancelled invoices are read-only by domain rule, so the editor
  * refuses them with a clear Persian notice instead of a form.
+ *
+ * The editor renders a LIVE preview of the document while the user types, so
+ * this route also supplies the draft half of the preview model: the current
+ * `BusinessProfile` with its branding assets resolved to public urls, and the
+ * invoice currency. Both are read-only reads (`previewService`), and the
+ * editor's save/finalize path remains the only way anything is persisted.
  */
 export const dynamic = "force-dynamic";
 
@@ -85,10 +93,16 @@ export default async function NewInvoicePage({ searchParams }: NewInvoicePagePro
       );
     }
 
-    const [customerRecords, productRecords, settings] = await Promise.all([
+    const [customerRecords, productRecords, settings, draftPreviewContext] = await Promise.all([
       listCustomers(business.id),
       listProducts(business.id),
       getInvoiceSettings(business.id),
+      // Live-preview branding: the CURRENT BusinessProfile + its resolved
+      // logo/stamp/signature urls + the invoice currency. Presentation data
+      // only — the preview never writes, and finalization re-reads this row
+      // for the immutable snapshot. It must never break the editor, so a
+      // failure here degrades to "no branding" instead of propagating.
+      getDraftPreviewContext(business.id).catch(() => null),
     ]);
 
     // Optional draft-to-continue (?invoiceId=...) — only DRAFT rows are
@@ -150,6 +164,17 @@ export default async function NewInvoicePage({ searchParams }: NewInvoicePagePro
       );
     }
 
+    // The live preview always has a context: when branding cannot be read the
+    // document simply renders without a logo/stamp/signature (Task: never
+    // invent an asset url, never crash the editor).
+    const previewContext: LivePreviewBrandingContext = draftPreviewContext ?? {
+      businessId: business.id,
+      fallbackBusinessName: business.name,
+      currentProfile: null,
+      images: { logo: null, sellerStamp: null, sellerSignature: null },
+      currency: settings?.currency ?? "IRR",
+    };
+
     return (
       <div className="space-y-6">
         <PageHeader
@@ -172,6 +197,7 @@ export default async function NewInvoicePage({ searchParams }: NewInvoicePagePro
           currency={settings?.currency ?? "IRR"}
           defaultIssueDate={formatGregorianDateInput(new Date())}
           initialDraft={initialDraft}
+          previewContext={previewContext}
         />
       </div>
     );
