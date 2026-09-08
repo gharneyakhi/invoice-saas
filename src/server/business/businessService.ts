@@ -11,6 +11,7 @@ import {
   parseUpdateBusinessSettingsInput,
 } from "@/server/business/schema";
 import {
+  deleteStoredObject,
   isBusinessImageCategory,
   putBusinessImage,
   resolveFilePublicUrl,
@@ -638,19 +639,85 @@ export async function updateBusinessSettings(
   });
 }
 
+/** Strips control characters / surrounding whitespace and caps length. */
+function sanitizeDisplayFileName(name: string): string {
+  const cleaned = name.replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  if (!cleaned) return "image";
+  return cleaned.length > 255 ? cleaned.slice(0, 255) : cleaned;
+}
+
+/**
+ * Best-effort retirement of a replaced image, run ONLY after the new
+ * reference is safely persisted:
+ *
+ *   1. re-verifies the old File row belongs to this business and is not
+ *      already deleted (a cross-business cleanup is impossible);
+ *   2. skips everything when a finalized invoice's `InvoiceSellerSnapshot`
+ *      still references the old file — finalized snapshots must keep their
+ *      objects and rows intact;
+ *   3. otherwise soft-deletes the File row and removes the old object from
+ *      storage.
+ *
+ * Any failure is logged and swallowed: cleanup must never turn a successful
+ * replacement into a failed upload (the orphan is at worst reclaimable
+ * storage, while the new reference is already durable).
+ */
+async function retireReplacedImageFile(input: {
+  fileId: string;
+  businessId: string;
+  category: BusinessImageCategory;
+}): Promise<void> {
+  try {
+    const file = (await prisma.file.findFirst({
+      where: { id: input.fileId, businessId: input.businessId, deletedAt: null },
+      select: { id: true, storageKey: true },
+    })) as unknown as { id: string; storageKey: string } | null;
+    if (!file) return;
+
+    // The snapshot table mirrors the profile's three business-image columns.
+    const snapshotField = IMAGE_CATEGORY_PROFILE_FIELD[input.category];
+    const referencedBySnapshot = await prisma.invoiceSellerSnapshot.findFirst({
+      where: { [snapshotField]: file.id },
+      select: { id: true },
+    });
+    if (referencedBySnapshot) {
+      // A finalized invoice shows this image — keep both the object and row.
+      return;
+    }
+
+    await prisma.file.update({
+      where: { id: file.id },
+      data: { deletedAt: new Date() },
+    });
+    await deleteStoredObject(file.storageKey);
+  } catch (error) {
+    // Best-effort cleanup after a durable persist — never fail the upload.
+    console.error("[business] replaced-image cleanup skipped", error);
+  }
+}
+
 /**
  * Uploads one business image (logo / stamp / signature) for a business the
  * caller owns.
  *
  * The full server-side contract is implemented here: session + ownership are
- * proven, the archive rule is enforced, and the file's type and size are
- * validated server-side (never trusting the browser). The only deferred piece
- * is the actual object-storage write — `putBusinessImage` refuses with
- * `FileStorageNotConfiguredError` until the S3-compatible adapter is wired
- * (see `src/server/storage/storageService.ts`). The storage→`File` row→
- * profile-link sequence below activates unchanged together with it; no
- * `logoFileId`/`sellerStampFileId`/`sellerSignatureFileId` can ever be set
- * from a profile payload instead.
+ * proven first (the `businessId` used for storage scoping is the verified row
+ * id, never a client claim), the archive rule is enforced, and the file is
+ * validated server-side by declared type/size AND magic-byte content
+ * sniffing (performed by the storage adapter — the browser is never trusted).
+ *
+ * Database safety:
+ *   - The S3 write happens FIRST; only a confirmed `PutObject` is followed by
+ *     the `File` row + `BusinessProfile` link (one transaction). A failed
+ *     upload therefore leaves the profile reference and the File ledger
+ *     untouched — no dangling rows, no base64/image bytes in PostgreSQL.
+ *   - The stored `File.mimeType`/extension come from the adapter's sniffed
+ *     content type; `originalName` is sanitized display metadata only.
+ *   - Replacing an existing image uploads the new object, persists the new
+ *     reference, and only then retires the old object/row — and only when no
+ *     finalized invoice snapshot references it. `logoFileId` /
+ *     `sellerStampFileId` / `sellerSignatureFileId` can never be set from a
+ *     profile payload instead.
  */
 export async function uploadBusinessImage(
   businessId: string,
@@ -671,14 +738,16 @@ export async function uploadBusinessImage(
     throw new ValidationError("file: a file is required");
   }
 
-  // Server-side validation of type and size — the client's checks are UX only.
+  // Server-side pre-check of declared type and size — the client's checks are
+  // UX only; content sniffing still happens inside the adapter.
   validateImageUpload({ name: candidate.name, type: candidate.type, size: candidate.size });
 
   const bytes = new Uint8Array(await candidate.arrayBuffer());
 
-  // DEFERRED INTEGRATION POINT: throws FileStorageNotConfiguredError until the
-  // storage adapter exists. Everything below is the future wiring, kept here
-  // so enabling storage later touches only the storage module.
+  // 1. REAL object-storage upload. Refuses with FileStorageNotConfiguredError
+  // when the STORAGE_* env contract is incomplete and throws
+  // FileStorageUploadFailedError (safe, detail-free) when the provider
+  // rejects the write. Nothing touches the database before this resolves.
   const stored = await putBusinessImage({
     category,
     businessId: owned.id,
@@ -687,20 +756,33 @@ export async function uploadBusinessImage(
     bytes,
   });
 
-  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+  // 2. Persist the reference ONLY after the S3 upload succeeded.
+  let replacedFileId: string | null = null;
+  const saved = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    const profileField = IMAGE_CATEGORY_PROFILE_FIELD[category];
+
+    // Read the current reference first so a replacement can retire the old
+    // image after the new one is durably persisted.
+    const profile = (await tx.businessProfile.findUnique({
+      where: { businessId: owned.id },
+    })) as unknown as BusinessProfileRow | null;
+    const previousFileId = profile ? profile[profileField] : null;
+    if (previousFileId) {
+      replacedFileId = previousFileId;
+    }
+
     const file = await tx.file.create({
       data: {
         accountId: owned.accountId, // session-derived, never client-supplied
         businessId: owned.id,
         storageKey: stored.storageKey,
-        originalName: candidate.name,
-        mimeType: candidate.type,
+        originalName: sanitizeDisplayFileName(candidate.name),
+        mimeType: stored.mimeType, // canonical sniffed type, not the client claim
         size: candidate.size,
         category,
       },
     });
 
-    const profileField = IMAGE_CATEGORY_PROFILE_FIELD[category];
     await tx.businessProfile.update({
       where: { businessId: owned.id },
       data: { [profileField]: file.id },
@@ -709,4 +791,15 @@ export async function uploadBusinessImage(
     const reloaded = await tx.business.findUnique({ where: { id: owned.id } });
     return loadBusinessSettings(reloaded ?? owned, tx);
   });
+
+  // 3. Replacement cleanup — only now that the new reference is safely stored.
+  if (replacedFileId) {
+    await retireReplacedImageFile({
+      fileId: replacedFileId,
+      businessId: owned.id,
+      category,
+    });
+  }
+
+  return saved;
 }

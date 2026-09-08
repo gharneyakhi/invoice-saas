@@ -36,6 +36,7 @@ export const ActionErrorCode = {
   INVOICE_LIMIT_REACHED: "INVOICE_LIMIT_REACHED",
   ENTITLEMENT_DATA_ERROR: "ENTITLEMENT_DATA_ERROR",
   FILE_STORAGE_NOT_CONFIGURED: "FILE_STORAGE_NOT_CONFIGURED",
+  FILE_STORAGE_UPLOAD_FAILED: "FILE_STORAGE_UPLOAD_FAILED",
   INTERNAL_ERROR: "INTERNAL_ERROR",
 } as const;
 
@@ -71,6 +72,7 @@ function isKnownCodeError(error: unknown): ActionError | null {
     "INVOICE_LIMIT_REACHED",
     "ENTITLEMENT_DATA_ERROR",
     "FILE_STORAGE_NOT_CONFIGURED",
+    "FILE_STORAGE_UPLOAD_FAILED",
   ];
   if (typeof candidate === "string" && (known as readonly string[]).includes(candidate)) {
     const message =

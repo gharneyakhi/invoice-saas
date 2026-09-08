@@ -50,11 +50,11 @@ export class EntitlementDataError extends Error {
 }
 
 /**
- * The S3-compatible file-storage adapter is not wired up yet (see
- * `src/server/storage/storageService.ts` for the deliberately deferred
- * integration point). Any upload attempt fails with this error instead of
- * silently storing files somewhere they do not belong (base64 in the DB, a
- * local disk path masquerading as object storage, ...).
+ * The S3-compatible storage credentials/bucket are not configured (see the
+ * `STORAGE_*` env contract in `src/server/storage/storageService.ts`). Any
+ * upload attempt fails with this error instead of silently storing files
+ * somewhere they do not belong (base64 in the DB, a local disk path
+ * masquerading as object storage, ...).
  */
 export class FileStorageNotConfiguredError extends Error {
   readonly code = "FILE_STORAGE_NOT_CONFIGURED" as const;
@@ -62,5 +62,23 @@ export class FileStorageNotConfiguredError extends Error {
   constructor(message = "File storage is not configured") {
     super(message);
     this.name = "FileStorageNotConfiguredError";
+  }
+}
+
+/**
+ * A real object-storage write failed after the S3-compatible adapter was
+ * configured (provider rejection, network failure, invalid credentials, ...).
+ *
+ * Deliberately carries NO AWS SDK details: it is constructed only with the
+ * generic default message, so access keys, request IDs and raw provider error
+ * bodies can never cross the Server Action boundary. The underlying error is
+ * only logged server-side by the storage adapter.
+ */
+export class FileStorageUploadFailedError extends Error {
+  readonly code = "FILE_STORAGE_UPLOAD_FAILED" as const;
+
+  constructor(message = "File upload failed. Please try again.") {
+    super(message);
+    this.name = "FileStorageUploadFailedError";
   }
 }

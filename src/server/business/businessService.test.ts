@@ -41,7 +41,13 @@ const prismaMock = vi.hoisted(() => ({
   },
   file: {
     findMany: vi.fn(),
+    findFirst: vi.fn(),
+    findUnique: vi.fn(),
     create: vi.fn(),
+    update: vi.fn(),
+  },
+  invoiceSellerSnapshot: {
+    findFirst: vi.fn(),
   },
   subscription: {
     findMany: vi.fn(),
@@ -54,9 +60,22 @@ const prismaMock = vi.hoisted(() => ({
 
 const requireSession = vi.hoisted(() => vi.fn());
 
+/** Storage adapter boundary — mocked here; the adapter itself is covered by its own suite. */
+const putBusinessImageMock = vi.hoisted(() => vi.fn());
+const deleteStoredObjectMock = vi.hoisted(() => vi.fn());
+
 vi.mock("@/lib/prisma", () => ({
   prisma: prismaMock,
 }));
+
+vi.mock("@/server/storage/storageService", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/storage/storageService")>();
+  return {
+    ...actual,
+    putBusinessImage: putBusinessImageMock,
+    deleteStoredObject: deleteStoredObjectMock,
+  };
+});
 
 // Do not importOriginal() this module: it pulls auth-options.ts, which throws
 // at load time when GOOGLE_CLIENT_ID is unset. The error classes are
@@ -1199,19 +1218,46 @@ describe("updateBusinessSettings", () => {
 });
 
 describe("uploadBusinessImage", () => {
-  function pngFormData(options: { type?: string; size?: number } = {}): FormData {
+  function pngFormData(options: { type?: string; size?: number; name?: string } = {}): FormData {
     const bytes = new Uint8Array(options.size ?? 10);
-    const file = new File([bytes], "logo.png", { type: options.type ?? "image/png" });
+    const file = new File([bytes], options.name ?? "logo.png", {
+      type: options.type ?? "image/png",
+    });
     const formData = new FormData();
     formData.append("file", file);
     return formData;
   }
 
-  it("refuses honestly while the storage adapter is not wired (no fake success)", async () => {
+  const NEW_KEY = "business/biz-1/logo/2f9a0b1c-0000-4000-8000-000000000001.png";
+
+  beforeEach(() => {
+    // Storage adapter boundary: by default a *confirmed* S3 write.
+    putBusinessImageMock.mockReset();
+    deleteStoredObjectMock.mockReset();
+    putBusinessImageMock.mockResolvedValue({
+      storageKey: NEW_KEY,
+      mimeType: "image/png",
+    });
+    deleteStoredObjectMock.mockResolvedValue(undefined);
+  });
+
+  /** Rows the settings reloader needs after a successful upload. */
+  function mockReloadRows(profileOverrides: Partial<Record<string, unknown>> = {}) {
+    prismaMock.businessProfile.findUnique.mockResolvedValue(profileRow(profileOverrides));
+    prismaMock.invoiceSettings.findUnique.mockResolvedValue(settingsRow());
+    prismaMock.file.findMany.mockResolvedValue([]);
+  }
+
+  it("refuses with FILE_STORAGE_NOT_CONFIGURED when storage is not configured (no DB writes)", async () => {
     const { uploadBusinessImage } = await import("./businessService");
     const { FileStorageNotConfiguredError } = await import("@/server/errors");
 
     prismaMock.business.findUnique.mockResolvedValue(businessRow());
+    putBusinessImageMock.mockRejectedValue(
+      new FileStorageNotConfiguredError(
+        "Image uploads are disabled: STORAGE_ACCESS_KEY, STORAGE_SECRET_KEY and STORAGE_BUCKET must be configured.",
+      ),
+    );
 
     await expect(
       uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData()),
@@ -1220,6 +1266,7 @@ describe("uploadBusinessImage", () => {
     // Nothing may be persisted while storage is unavailable.
     expect(prismaMock.file.create).not.toHaveBeenCalled();
     expect(prismaMock.businessProfile.update).not.toHaveBeenCalled();
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
   });
 
   it("rejects an invalid mime type server-side before any storage call", async () => {
@@ -1230,9 +1277,10 @@ describe("uploadBusinessImage", () => {
     await expect(
       uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData({ type: "image/svg+xml" })),
     ).rejects.toBeInstanceOf(ValidationError);
+    expect(putBusinessImageMock).not.toHaveBeenCalled();
   });
 
-  it("rejects an oversized file server-side", async () => {
+  it("rejects an oversized file server-side before any storage call", async () => {
     const { uploadBusinessImage } = await import("./businessService");
 
     prismaMock.business.findUnique.mockResolvedValue(businessRow());
@@ -1240,6 +1288,7 @@ describe("uploadBusinessImage", () => {
     await expect(
       uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData({ size: 6 * 1024 * 1024 })),
     ).rejects.toBeInstanceOf(ValidationError);
+    expect(putBusinessImageMock).not.toHaveBeenCalled();
   });
 
   it("rejects a payload without a real file", async () => {
@@ -1253,6 +1302,7 @@ describe("uploadBusinessImage", () => {
     await expect(
       uploadBusinessImage("biz-1", "BUSINESS_LOGO", formData),
     ).rejects.toBeInstanceOf(ValidationError);
+    expect(putBusinessImageMock).not.toHaveBeenCalled();
   });
 
   it("rejects uploads for an archived business", async () => {
@@ -1265,9 +1315,10 @@ describe("uploadBusinessImage", () => {
     await expect(
       uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData()),
     ).rejects.toBeInstanceOf(ValidationError);
+    expect(putBusinessImageMock).not.toHaveBeenCalled();
   });
 
-  it("rejects uploads for another account's business", async () => {
+  it("rejects uploads for another account's business (cross-business attempt never reaches storage)", async () => {
     const { ForbiddenError } = await import("@/server/auth/requireSession");
     const { uploadBusinessImage } = await import("./businessService");
 
@@ -1278,6 +1329,8 @@ describe("uploadBusinessImage", () => {
     await expect(
       uploadBusinessImage("biz-other", "BUSINESS_LOGO", pngFormData()),
     ).rejects.toBeInstanceOf(ForbiddenError);
+    expect(putBusinessImageMock).not.toHaveBeenCalled();
+    expect(prismaMock.file.create).not.toHaveBeenCalled();
   });
 
   it("rejects an unsupported category", async () => {
@@ -1288,5 +1341,167 @@ describe("uploadBusinessImage", () => {
     await expect(
       uploadBusinessImage("biz-1", "GENERATED_PDF" as never, pngFormData()),
     ).rejects.toBeInstanceOf(ValidationError);
+    expect(putBusinessImageMock).not.toHaveBeenCalled();
+  });
+
+  it("uploads, then persists the File row + profile link only after the S3 write resolves", async () => {
+    const { uploadBusinessImage } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+    mockReloadRows();
+    prismaMock.file.create.mockResolvedValue(fileRow({ id: "file-new", storageKey: NEW_KEY }));
+
+    const record = await uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData());
+
+    // The adapter received the ownership-verified id and the raw file bytes.
+    expect(putBusinessImageMock).toHaveBeenCalledTimes(1);
+    const callArgs = putBusinessImageMock.mock.calls[0]![0];
+    expect(callArgs).toMatchObject({
+      category: "BUSINESS_LOGO",
+      businessId: "biz-1",
+      fileName: "logo.png",
+      mimeType: "image/png",
+    });
+    expect(callArgs.bytes).toBeInstanceOf(Uint8Array);
+
+    // DB row created from the ADAPTER-returned key/type — never from the filename.
+    expect(prismaMock.file.create).toHaveBeenCalledWith({
+      data: {
+        accountId: "acc-1", // session-derived, never client-supplied
+        businessId: "biz-1",
+        storageKey: NEW_KEY,
+        originalName: "logo.png",
+        mimeType: "image/png",
+        size: 10,
+        category: "BUSINESS_LOGO",
+      },
+    });
+    expect(prismaMock.businessProfile.update).toHaveBeenCalledWith({
+      where: { businessId: "biz-1" },
+      data: { logoFileId: "file-new" },
+    });
+
+    expect(record.business.id).toBe("biz-1");
+
+    // First upload: nothing to retire.
+    expect(deleteStoredObjectMock).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes a malicious/traversal filename into display-only metadata and stores the server key", async () => {
+    const { uploadBusinessImage } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+    mockReloadRows();
+    prismaMock.file.create.mockResolvedValue(fileRow({ id: "file-new", storageKey: NEW_KEY }));
+
+    await uploadBusinessImage(
+      "biz-1",
+      "BUSINESS_LOGO",
+      pngFormData({ name: "../../../etc/passwd.png", type: "image/png" }),
+    );
+
+    // The object key comes from the adapter (server-generated uuid); the raw
+    // filename never becomes a key or a path component.
+    const createdData = prismaMock.file.create.mock.calls[0]![0].data as {
+      storageKey: string;
+      originalName: string;
+    };
+    expect(createdData.storageKey).toBe(NEW_KEY);
+    expect(createdData.storageKey).not.toContain("passwd");
+    expect(createdData.storageKey).not.toContain("..");
+    expect(putBusinessImageMock.mock.calls[0]![0].fileName).toBe("../../../etc/passwd.png");
+  });
+
+  it("keeps the database untouched when the S3 upload fails", async () => {
+    const { uploadBusinessImage } = await import("./businessService");
+    const { FileStorageUploadFailedError } = await import("@/server/errors");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+    putBusinessImageMock.mockRejectedValue(new FileStorageUploadFailedError());
+
+    await expect(
+      uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData()),
+    ).rejects.toBeInstanceOf(FileStorageUploadFailedError);
+
+    // No profile reference update, no dangling File record, no transaction.
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.file.create).not.toHaveBeenCalled();
+    expect(prismaMock.businessProfile.update).not.toHaveBeenCalled();
+  });
+
+  it("replaces an existing image: new object, new reference, then old-object cleanup", async () => {
+    const { uploadBusinessImage } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+    // The profile currently points at an old logo file.
+    mockReloadRows({ logoFileId: "file-old" });
+    prismaMock.file.create.mockResolvedValue(fileRow({ id: "file-new", storageKey: NEW_KEY }));
+    prismaMock.file.findFirst.mockResolvedValue(
+      fileRow({ id: "file-old", storageKey: "business/biz-1/logo/old.png" }),
+    );
+    prismaMock.file.update.mockResolvedValue(fileRow({ id: "file-old" }));
+    prismaMock.invoiceSellerSnapshot.findFirst.mockResolvedValue(null);
+
+    await uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData());
+
+    // New reference persisted first…
+    expect(prismaMock.businessProfile.update).toHaveBeenCalledWith({
+      where: { businessId: "biz-1" },
+      data: { logoFileId: "file-new" },
+    });
+    // …old row soft-deleted and old object removed afterwards.
+    expect(prismaMock.file.update).toHaveBeenCalledWith({
+      where: { id: "file-old" },
+      data: { deletedAt: expect.any(Date) },
+    });
+    expect(deleteStoredObjectMock).toHaveBeenCalledTimes(1);
+    expect(deleteStoredObjectMock).toHaveBeenCalledWith("business/biz-1/logo/old.png");
+
+    // Cleanup must run only AFTER the new reference is durably persisted.
+    const profileUpdateOrder = prismaMock.businessProfile.update.mock.invocationCallOrder[0] ?? 0;
+    const fileCreateOrder = prismaMock.file.create.mock.invocationCallOrder[0] ?? 0;
+    const deleteOrder = deleteStoredObjectMock.mock.invocationCallOrder[0] ?? 0;
+    expect(deleteOrder).toBeGreaterThan(fileCreateOrder);
+    expect(deleteOrder).toBeGreaterThan(profileUpdateOrder);
+  });
+
+  it("never removes an image a finalized invoice snapshot still references", async () => {
+    const { uploadBusinessImage } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+    mockReloadRows({ logoFileId: "file-old" });
+    prismaMock.file.create.mockResolvedValue(fileRow({ id: "file-new", storageKey: NEW_KEY }));
+    prismaMock.file.findFirst.mockResolvedValue(
+      fileRow({ id: "file-old", storageKey: "business/biz-1/logo/old.png" }),
+    );
+    prismaMock.invoiceSellerSnapshot.findFirst.mockResolvedValue({ id: "snapshot-1" });
+
+    await uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData());
+
+    // New reference persisted…
+    expect(prismaMock.businessProfile.update).toHaveBeenCalledWith({
+      where: { businessId: "biz-1" },
+      data: { logoFileId: "file-new" },
+    });
+    // …but the snapshot-referenced old file/object is preserved.
+    expect(prismaMock.file.update).not.toHaveBeenCalled();
+    expect(deleteStoredObjectMock).not.toHaveBeenCalled();
+  });
+
+  it("does not fail a successful replacement when best-effort cleanup errors", async () => {
+    const { uploadBusinessImage } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+    mockReloadRows({ logoFileId: "file-old" });
+    prismaMock.file.create.mockResolvedValue(fileRow({ id: "file-new", storageKey: NEW_KEY }));
+    prismaMock.file.findFirst.mockResolvedValue(
+      fileRow({ id: "file-old", storageKey: "business/biz-1/logo/old.png" }),
+    );
+    prismaMock.file.update.mockResolvedValue(fileRow({ id: "file-old" }));
+    prismaMock.invoiceSellerSnapshot.findFirst.mockResolvedValue(null);
+    deleteStoredObjectMock.mockRejectedValue(new Error("provider hiccup"));
+
+    const record = await uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData());
+    expect(record.business.id).toBe("biz-1");
   });
 });

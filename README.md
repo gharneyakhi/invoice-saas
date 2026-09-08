@@ -421,7 +421,9 @@ Loading skeletons and a not-found state are included; the dashboard
 - `getBusinessSettings` / `listBusinessProfiles` — session-scoped reads with
   image references resolved to public URLs.
 - `uploadBusinessImage` — ownership + archive rule + server-side type/size
-  validation, then the storage call (deferred, below).
+  validation, then the real S3-compatible storage write (see "File storage"
+  below); the DB reference is persisted only after the upload confirms, and
+  replaced images are retired only afterwards (snapshot-safe).
 - `updateBusiness` — gained the same archived-business edit guard the invoice
   service already applies (`ValidationError`), required by the archive rules.
 
@@ -439,47 +441,71 @@ Loading skeletons and a not-found state are included; the dashboard
   `InvoiceCustomerSnapshot` — finalized invoices stay immutable; drafts
   continue reading the live profile exactly as before.
 
-### File storage — INTENTIONALLY DEFERRED
+### File storage — REAL S3-compatible adapter
 
-The planned S3-compatible storage abstraction is **not wired yet**, and
-nothing fakes it (no fake S3, no base64-in-DB, no credentials in client
-code). `src/server/storage/storageService.ts` is the honest contract:
+`src/server/storage/storageService.ts` implements the production
+S3-compatible adapter for business images (logo / seller stamp / seller
+signature) with `@aws-sdk/client-s3` (AWS S3, Cloudflare R2, MinIO, Arvan,
+Liara, ... — provider is chosen purely by the documented `STORAGE_*` env
+contract in `.env.example`):
 
-- `validateImageUpload` — server-side MIME allow-list (PNG/JPEG/WebP) and 5 MB
-  size cap, enforced before any storage call.
-- `resolveFilePublicUrl` — public URL resolution from
-  `STORAGE_PUBLIC_BASE_URL` only (presigned URLs would be part of the future
-  adapter).
-- `putBusinessImage` — the single deferred integration point: it throws
-  `FileStorageNotConfiguredError` (mapped to the stable
-  `FILE_STORAGE_NOT_CONFIGURED` action code). Implementing it with a real
-  `PutObject` against the documented env vars plus flipping
-  `FILE_UPLOADS_ENABLED` activates the complete upload UI/Action/service path
-  with no other changes. Until then the upload zones render an explicit
-  "needs storage" notice instead of pretending.
+- **Server-side only** — credentials are read from the environment on the
+  server and never reach the browser; the UI only receives an
+  `isFileUploadsEnabled()` boolean and already-resolved public URLs.
+- **Validation** — declared MIME allow-list (PNG/JPEG/WebP) and a 5 MB cap,
+  plus **magic-byte content sniffing**: the stored `Content-Type`, key
+  extension and `File.mimeType` come from the real bytes, so a spoofed
+  `image/png` header over HTML/script content is rejected.
+- **Object keys** — server-generated
+  `business/{businessId}/{logo|stamp|signature}/{uuid}.{ext}`. The raw user
+  filename is never part of a key and no user-controlled metadata is attached
+  to objects; business ids are validated against safe key segments.
+- **Database safety** — the S3 `PutObject` resolves FIRST; only then is the
+  `File` row created and the `BusinessProfile` link updated (one
+  transaction). A failed upload leaves the database untouched; no image bytes
+  or base64 are ever stored in PostgreSQL.
+- **Replacement** — upload new object → persist new reference → only then
+  retire the old object/row (best-effort), and only when no finalized
+  invoice's `InvoiceSellerSnapshot` references it — finalized snapshots are
+  never modified or orphaned.
+- **Error handling** — incomplete `STORAGE_*` config keeps uploads disabled
+  with the stable `FILE_STORAGE_NOT_CONFIGURED` code; provider failures map
+  to the new stable `FILE_STORAGE_UPLOAD_FAILED` code. Raw AWS SDK details
+  (request IDs, credential hints, error bodies) are logged server-side only
+  and never cross the Server Action boundary.
+- `resolveFilePublicUrl` — display URLs are built from
+  `STORAGE_PUBLIC_BASE_URL` only (public-URL architecture; presigned URLs are
+  intentionally not invented).
+
+The upload UI on the business settings pages was already built for this
+contract and now activates automatically when the env is configured: it
+shows the server-confirmed image reference, refreshes via `router.refresh()`,
+and renders explicit "storage not configured" / upload-failure notices
+otherwise. Create mode stays inert until the business exists.
 
 ### Database schema
 
 **No changes.** Every exposed field already exists on `BusinessProfile` /
-`InvoiceSettings`; the initial migration is untouched.
+`InvoiceSettings` / `File`; the initial migration is untouched.
 
 ### Verification
 
-- `npx vitest run` → **608/609 passing**; the single failure
+- `npx vitest run` → **638/639 passing**; the single failure
   (`src/lib/finalization.test.ts` — a Persian message asserting "ورود" where
   the code says "وارد حساب کاربری شوید") fails identically on pristine
   `main` and is unrelated to this task (left untouched deliberately).
-  61 tests were added: business schema validation (21), storage contract (8),
-  business service profiles/settings/uploads (22 blocks incl. `it.each`),
-  action-boundary mapping/serialization (6 blocks).
-- `npx tsc --noEmit` → **zero new errors** (the 39 baseline errors all stem
-  from the un-generated Prisma client stub; none are in the new files).
+  Net +30 tests: the storage adapter suite (30 — env contract, sniffing,
+  key generation, mocked-SDK put/delete, safe error mapping), business
+  service upload flow (replacement ordering, snapshot preservation, DB
+  untouched on failure), action-boundary leak tests.
+- `npx tsc --noEmit` → **zero new errors** (the 31 baseline errors all stem
+  from the un-generated Prisma client stub; none are in the touched files).
 - `npx eslint .` → clean.
 - `npx next build` → **compiles and lints successfully**, but cannot finish
-  in this sandbox: the type gate trips on the pre-existing stub errors and
-  page-data collection fails loading the missing `.prisma/client` module (the
-  pre-existing `/api/auth/[...nextauth]` route). Root cause unchanged:
-  `binaries.prisma.sh` is blocked, so `prisma generate` cannot run.
+  in this sandbox: the type gate trips on the pre-existing stub errors
+  (`prisma/seed.ts` — `PlanKey` missing from the stub `@prisma/client`).
+  Root cause unchanged: `binaries.prisma.sh` is blocked, so `prisma generate`
+  cannot run.
 
 ## 10. Running locally (once you have the above)
 
