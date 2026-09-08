@@ -1,23 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import Decimal from "decimal.js";
 import type { InvoiceRecord } from "@/server/invoice/invoiceService";
 
-// The module under test is value-imported; its server-side dependencies
-// (session/auth modules) must not evaluate in the node test environment.
-vi.mock("@/server/auth/requireBusinessOwnership", () => ({
-  requireBusinessOwnership: vi.fn(),
-}));
-vi.mock("@/server/auth/requireSession", () => {
-  class UnauthorizedError extends Error {}
-  class ForbiddenError extends Error {}
-  class NotFoundError extends Error {}
-  return {
-    UnauthorizedError,
-    ForbiddenError,
-    NotFoundError,
-    requireSession: vi.fn(),
-  };
-});
 import {
   buildInvoicePreviewModel,
   previewLifecycle,
@@ -25,10 +9,15 @@ import {
   type BuildInvoicePreviewModelInput,
   type PreviewImages,
   type PreviewProfileSource,
-} from "@/server/invoice/previewService";
+} from "@/lib/invoice-preview-model";
 
 /**
  * Pure preview-model tests (no DB, no mocks).
+ *
+ * The builder under test lives in `@/lib/invoice-preview-model` (it is shared
+ * with the editor's live preview), which is why this suite imports it from
+ * there instead of from `previewService` — and why it needs no mocks at all:
+ * the model layer touches neither Prisma nor the session.
  *
  * These pin the data-source law of the preview: DRAFT rows read the CURRENT
  * profile/customer; FINALIZED / CANCELLED rows read the immutable snapshots
