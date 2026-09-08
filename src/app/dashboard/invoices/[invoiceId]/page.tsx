@@ -19,6 +19,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { FinalizeInvoiceButton } from "@/components/invoice/FinalizeInvoiceButton";
+import { InvoiceExportMenu } from "@/components/invoice/InvoiceExportMenu";
+import { GmailOutcomeBanner } from "@/components/invoice/GmailOutcomeBanner";
 import {
   AlertCircleIcon,
   CheckCircleIcon,
@@ -261,6 +263,14 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
                 <span>پیش‌نمایش / چاپ</span>
               </Button>
             </Link>
+            {/* Export & Sharing V1 — one menu for PDF/PNG/JPG/Excel and the
+                Telegram/Gmail share flows (print stays on the preview link). */}
+            <InvoiceExportMenu
+              businessId={business.id}
+              invoiceId={record.id}
+              isDraft={isDraft}
+              mode="detail"
+            />
             {canFinalize && <FinalizeInvoiceButton invoiceId={record.id} />}
             {isDraft && (
               <Link href={`/dashboard/invoices/new?invoiceId=${encodeURIComponent(record.id)}`}>
@@ -273,6 +283,9 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
           </div>
         }
       />
+
+      {/* Gmail connect outcome (?gmail=...) after the OAuth round-trip. */}
+      <GmailOutcomeBanner />
 
       {isFinalized && (
         <div className="flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs leading-relaxed text-emerald-800">
