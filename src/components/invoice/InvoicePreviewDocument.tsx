@@ -13,25 +13,31 @@ import type {
   InvoicePreviewCustomer,
   InvoicePreviewModel,
   InvoicePreviewSeller,
-} from "@/server/invoice/previewService";
+} from "@/lib/invoice-preview-model";
 
 /**
- * Invoice Preview / Print Document V1 (server-rendered, Persian RTL, A4-ready).
+ * Invoice Preview / Print Document V1 (Persian RTL, A4-ready).
+ *
+ * Rendered by BOTH the server route `/dashboard/invoices/[invoiceId]/preview`
+ * and the invoice editor's live preview — the two only differ in where their
+ * `InvoicePreviewModel` came from, never in markup or styling.
  *
  * This component renders ONE invoice exactly as it must be presented to a
  * customer — the letterhead, invoice meta, seller/customer parties, line-item
  * table, totals, payment state, notes and stamp/signature images — for both
  * the on-screen preview and the A4 print output of the browser.
  *
- * Data law (enforced upstream by `previewService`, rendered verbatim here):
+ * Data law (enforced upstream by `@/lib/invoice-preview-model` — the model
+ * this component renders — and rendered verbatim here):
  *   - DRAFT rows show the CURRENT BusinessProfile / live Customer;
  *   - FINALIZED / CANCELLED rows show the immutable finalization snapshots;
  *   - all money/percent/date values come from the authoritative server DTO
  *     and are only FORMATTED here — this component performs no financial
  *     math and re-computes nothing.
  *
- * No client-side hooks: it is pure server markup, so the same tree can later
- * feed a PDF generator without restructuring.
+ * No hooks and no client state: it is pure markup over a model, so the same
+ * tree serves server rendering, the editor's live preview and, later, a PDF
+ * generator — without restructuring and without recomputing anything.
  */
 
 // ---------------------------------------------------------------------------
@@ -495,7 +501,8 @@ export interface InvoicePreviewDocumentProps {
 
 /**
  * The A4 invoice document. `model` is the fully authorized, server-assembled
- * preview payload (see `previewService.getInvoicePreviewData`).
+ * preview payload (see `previewService.getInvoicePreviewData` for saved
+ * invoices and `@/lib/invoice-live-preview` for the editor's unsaved state).
  */
 export function InvoicePreviewDocument({ model }: InvoicePreviewDocumentProps) {
   const seller = model.seller;
