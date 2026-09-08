@@ -21,6 +21,7 @@ import {
   CheckCircleIcon,
   ChevronRightIcon,
   FileTextIcon,
+  PrinterIcon,
 } from "@/components/icons";
 import {
   canFinalizeInvoice,
@@ -73,6 +74,62 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
     </div>
   );
 }
+
+/**
+ * Seller/party display shapes shared by the current profile (drafts) and the
+ * immutable snapshots (finalized/cancelled rows). The detail view renders
+ * whichever source the invoice lifecycle dictates — see the page body below.
+ */
+interface SellerDisplayInfo {
+  businessName: string;
+  slogan: string | null;
+  ownerName: string | null;
+  address: string | null;
+  email: string | null;
+  mobile: string | null;
+  landline: string | null;
+  cardNumber: string | null;
+  accountNumber: string | null;
+  iban: string | null;
+  footerText: string | null;
+}
+
+interface CustomerDisplayInfo {
+  name: string;
+  mobile: string | null;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  nationalId: string | null;
+  economicCode: string | null;
+}
+
+/** Shape of a `BusinessProfile`/seller-snapshot row read for DRAFT previews. */
+type SellerContactRow = {
+  id: string;
+  businessName: string;
+  slogan: string | null;
+  ownerName: string | null;
+  address: string | null;
+  email: string | null;
+  mobile: string | null;
+  landline: string | null;
+  cardNumber: string | null;
+  accountNumber: string | null;
+  iban: string | null;
+  footerText: string | null;
+};
+
+type LiveCustomerRow = {
+  id: string;
+  name: string;
+  mobile: string | null;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  nationalId: string | null;
+  economicCode: string | null;
+};
 
 export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) {
   let businesses;
@@ -132,38 +189,16 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
   const isCancelled = isCancelledInvoice(invoiceLifecycle);
 
   // For DRAFT invoices: resolve current BusinessProfile and live customer.
-  let profile: {
-    id: string;
-    businessName: string;
-    slogan: string | null;
-    ownerName: string | null;
-    address: string | null;
-    email: string | null;
-    mobile: string | null;
-    landline: string | null;
-    cardNumber: string | null;
-    accountNumber: string | null;
-    iban: string | null;
-    footerText: string | null;
-  } | null = null;
+  let profile: SellerContactRow | null = null;
 
-  let liveCustomer: {
-    id: string;
-    name: string;
-    mobile: string | null;
-    phone: string | null;
-    email: string | null;
-    address: string | null;
-    nationalId: string | null;
-    economicCode: string | null;
-  } | null = null;
+  let liveCustomer: LiveCustomerRow | null = null;
 
   if (isDraft) {
     const profileRow = await prisma.businessProfile.findUnique({
       where: { businessId: business.id },
     });
     if (profileRow) {
-      profile = profileRow as typeof profile;
+      profile = profileRow as SellerContactRow;
     }
 
     if (record.customerId) {
@@ -171,7 +206,7 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
         where: { id: record.customerId },
       });
       if (customerRow) {
-        liveCustomer = customerRow as typeof liveCustomer;
+        liveCustomer = customerRow as LiveCustomerRow;
       }
     }
   }
@@ -180,10 +215,14 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
   const statusMeta = formatInvoiceStatus(invoice.status);
 
   // Seller info source: current profile for drafts, immutable snapshot for finalized.
-  const sellerInfo = isDraft ? profile : (record.sellerSnapshot as typeof profile);
+  const sellerInfo: SellerDisplayInfo | null = isDraft
+    ? profile
+    : (record.sellerSnapshot ?? null);
 
   // Customer info source: live customer for drafts, immutable snapshot for finalized.
-  const customerInfo = isDraft ? liveCustomer : (record.customerSnapshot as typeof liveCustomer);
+  const customerInfo: CustomerDisplayInfo | null = isDraft
+    ? liveCustomer
+    : (record.customerSnapshot ?? null);
 
   const sellerName = sellerInfo?.businessName ?? business.name;
   const customerName = customerInfo?.name ?? null;
@@ -200,6 +239,15 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
         }
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            {/* Preview & print — read-only for drafts and finalized rows alike;
+                the preview route never finalizes, never consumes quota and
+                never writes anything. */}
+            <Link href={`/dashboard/invoices/${encodeURIComponent(record.id)}/preview`}>
+              <Button variant="outline" size="sm" className="gap-1.5">
+                <PrinterIcon size={15} />
+                <span>پیش‌نمایش / چاپ</span>
+              </Button>
+            </Link>
             {canFinalize && <FinalizeInvoiceButton invoiceId={record.id} />}
             {isDraft && (
               <Link href={`/dashboard/invoices/new?invoiceId=${encodeURIComponent(record.id)}`}>

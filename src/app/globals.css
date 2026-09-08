@@ -29,6 +29,60 @@
   }
 }
 
+/* ==========================================================================
+   Print — Invoice Preview & Print Layout V1
+   --------------------------------------------------------------------------
+   Printing is A4 portrait with zero @page margin; the invoice sheet carries
+   its own generous internal padding, so physical printer margins never clip
+   content. Colors are preserved (print-color-adjust) because the invoice
+   uses the business brand color. Table headers repeat on page breaks and
+   rows never split mid-way. The dashboard chrome is hidden with Tailwind's
+   `print:` variants on the shell components + the preview toolbar, so a
+   print/PDF capture of the preview route contains only the invoice.
+   ========================================================================== */
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 0;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+  }
+
+  .invoice-print-sheet {
+    width: 210mm !important;
+    margin: 0 auto !important;
+    border-radius: 0 !important;
+    --tw-ring-offset-shadow: none !important;
+    --tw-ring-shadow: none !important;
+    box-shadow: none !important;
+    orphans: 3;
+    widows: 3;
+  }
+
+  /* Keep brand/status colors in the printed document */
+  .invoice-print-sheet,
+  .invoice-print-sheet * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Never split a table row / totals / notes across pages */
+  .invoice-print-sheet tr,
+  .invoice-print-sheet .avoid-break {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Repeat the items-table header when the table spans pages */
+  .invoice-print-sheet table thead {
+    display: table-header-group;
+  }
+}
+
 /* Custom scrollbar for desktop */
 ::-webkit-scrollbar {
   width: 6px;
