@@ -11,6 +11,7 @@ import {
   normalizeLocalizedNumber,
   toNumericInputString,
   formatGregorianDateInput,
+  formatPaymentMethod,
 } from "./formatters";
 
 describe("formatters", () => {
@@ -53,6 +54,13 @@ describe("formatters", () => {
       expect(formatCurrency(null)).toBe("۰ ریال");
       expect(formatCurrency(undefined)).toBe("۰ ریال");
       expect(formatCurrency("")).toBe("۰ ریال");
+    });
+
+    it("formats تومان when the unit is IRT (not a relabel of ریال)", () => {
+      expect(formatCurrency(1000, "IRT")).toBe("۱,۰۰۰ تومان");
+      expect(formatCurrency("2500000.00", "IRT")).toBe("۲,۵۰۰,۰۰۰ تومان");
+      expect(formatCurrency(null, "IRT")).toBe("۰ تومان");
+      expect(formatCurrency(1000, "IRR")).toBe("۱,۰۰۰ ریال");
     });
   });
 

@@ -42,6 +42,23 @@ export function isCancelledInvoice(invoice: InvoiceLifecycleView): boolean {
 export const FINALIZATION_CONFIRMATION_MESSAGE =
   "پس از نهایی کردن، فاکتور قابل ویرایش نخواهد بود. آیا مطمئن هستید؟";
 
+/**
+ * Confirmation content for the editor's «صدور نهایی» dialog.
+ *
+ * The editor asks the same question the detail page's `window.confirm` asks,
+ * but as a real dialog with explicit Persian action labels (a native confirm
+ * dialog cannot control its buttons). Both texts state the same irreversible
+ * rule — one more reason the copy lives next to the rule it describes.
+ */
+export const FINALIZATION_CONFIRMATION = {
+  title: "صدور نهایی فاکتور",
+  message:
+    "پس از صدور نهایی، فاکتور قابل ویرایش نخواهد بود. آیا از صدور فاکتور مطمئن هستید؟",
+  warning: "شماره رسمی فاکتور هنگام صدور صادر می‌شود و یک سهمیه از پلن شما مصرف می‌گردد.",
+  confirmLabel: "صدور نهایی",
+  cancelLabel: "انصراف",
+} as const;
+
 const FALLBACK_MESSAGES: Record<ActionErrorCode, string> = {
   UNAUTHORIZED: "برای نهایی کردن فاکتور باید وارد حساب کاربری شوید.",
   FORBIDDEN: "شما به این فاکتور دسترسی ندارید.",

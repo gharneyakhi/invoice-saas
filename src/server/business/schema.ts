@@ -146,19 +146,26 @@ const nullableIban = z.preprocess(
     .optional(),
 );
 
-/** Optional brand color as a `#rrggbb` hex string, normalized to lowercase. */
-const nullablePrimaryColor = z.preprocess(
-  (value) => {
-    if (typeof value !== "string") return value;
-    const trimmed = value.trim();
-    return trimmed === "" ? null : trimmed.toLowerCase();
-  },
-  z
-    .string({ invalid_type_error: "primaryColor must be a string" })
-    .regex(PRIMARY_COLOR_PATTERN, "primaryColor must be a hex color like #2563eb")
-    .nullable()
-    .optional(),
-);
+/** Optional `#rrggbb` hex string, normalized to lowercase. Empty → null. */
+const nullableHexColor = (fieldName: string) =>
+  z.preprocess(
+    (value) => {
+      if (typeof value !== "string") return value;
+      const trimmed = value.trim();
+      return trimmed === "" ? null : trimmed.toLowerCase();
+    },
+    z
+      .string({ invalid_type_error: `${fieldName} must be a string` })
+      .regex(PRIMARY_COLOR_PATTERN, `${fieldName} must be a hex color like #2563eb`)
+      .nullable()
+      .optional(),
+  );
+
+/** Header (letterhead) background — not body text. */
+const nullablePrimaryColor = nullableHexColor("primaryColor");
+
+/** Footer strip background. */
+const nullableFooterBackgroundColor = nullableHexColor("footerBackgroundColor");
 
 /** The client-writable columns of `model BusinessProfile`, and nothing else. */
 export const businessProfileFields = {
@@ -172,6 +179,7 @@ export const businessProfileFields = {
   accountNumber: nullableAccountNumber,
   iban: nullableIban,
   primaryColor: nullablePrimaryColor,
+  footerBackgroundColor: nullableFooterBackgroundColor,
   footerText: nullableText("footerText", FOOTER_TEXT_MAX_LENGTH),
 } as const;
 
@@ -179,7 +187,6 @@ export const businessProfileFields = {
 // InvoiceSettings fields (the editable subset of `model InvoiceSettings`)
 // ---------------------------------------------------------------------------
 
-const CURRENCY_PATTERN = /^[A-Z]{3}$/;
 const VAT_PERCENT_PATTERN = /^\d+(\.\d{1,2})?$/;
 const INVOICE_PREFIX_PATTERN = /^[\w-]{1,20}$/;
 
@@ -205,9 +212,16 @@ const vatPercentField = z.preprocess(
     }),
 );
 
+/**
+ * V1 invoice unit: ریال (`IRR`) or تومان (`IRT`) only. A later settings
+ * change never rewrites finalized invoices — those snapshot `Invoice.currency`
+ * at finalization time.
+ */
 const currencyField = z.preprocess(
   (value) => (typeof value === "string" ? value.trim().toUpperCase() : value),
-  z.string().regex(CURRENCY_PATTERN, "currency must be a 3-letter code like IRR"),
+  z.enum(["IRR", "IRT"], {
+    errorMap: () => ({ message: "currency must be IRR (ریال) or IRT (تومان)" }),
+  }),
 );
 
 const invoicePrefixField = z.preprocess(

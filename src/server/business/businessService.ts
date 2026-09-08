@@ -89,6 +89,7 @@ export interface BusinessProfileRow {
   sellerStampFileId: string | null;
   sellerSignatureFileId: string | null;
   primaryColor: string | null;
+  footerBackgroundColor: string | null;
   footerText: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -180,6 +181,7 @@ const PROFILE_FIELD_KEYS = [
   "accountNumber",
   "iban",
   "primaryColor",
+  "footerBackgroundColor",
   "footerText",
 ] as const;
 

@@ -99,6 +99,7 @@ const SNAPSHOT_SELLER = {
   sellerStampFileId: null,
   sellerSignatureFileId: "file-sign-snap",
   primaryColor: "#0055ff",
+  footerBackgroundColor: "#111827",
   footerText: "پانوشت snapshot",
 };
 
@@ -134,6 +135,7 @@ function finalizedRecord(overrides: Partial<Record<string, unknown>> = {}): Invo
     total: MONEY("196200"),
     paidAmount: MONEY("50000"),
     remainingAmount: MONEY("146200"),
+    currency: "IRR",
     notes: null,
     createdAt: new Date("2026-03-05T00:00:00.000Z"),
     updatedAt: new Date("2026-03-05T00:00:00.000Z"),
@@ -171,6 +173,7 @@ function draftRecord(overrides: Partial<Record<string, unknown>> = {}): InvoiceR
     status: "DRAFT",
     paidAmount: MONEY("0"),
     remainingAmount: MONEY("196200"),
+    currency: null,
     finalizedAt: null,
     sellerSnapshot: null,
     customerSnapshot: null,
@@ -195,6 +198,7 @@ const PROFILE_ROW = {
   sellerStampFileId: null,
   sellerSignatureFileId: null,
   primaryColor: "#123456",
+  footerBackgroundColor: "#fde68a",
   footerText: "پانوشت profile",
   createdAt: new Date("2026-01-01T00:00:00.000Z"),
   updatedAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -327,7 +331,17 @@ describe("getInvoicePreviewData — finalized rows read snapshots only", () => {
     }
   });
 
-  it("maps the invoice settings currency", async () => {
+  it("uses the stored Invoice.currency snapshot and never consults later InvoiceSettings", async () => {
+    prismaMock.invoiceSettings.findUnique.mockResolvedValue({ id: "set-1", currency: "IRT" });
+    prismaMock.file.findMany.mockResolvedValue([]);
+
+    const model = await getInvoicePreviewData("biz-1", "inv-1");
+    expect(model.currency).toBe("IRR");
+    expect(prismaMock.invoiceSettings.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("falls back to InvoiceSettings for a legacy finalized row with a null currency snapshot", async () => {
+    getInvoiceMock.mockResolvedValue(finalizedRecord({ currency: null }));
     prismaMock.invoiceSettings.findUnique.mockResolvedValue({ id: "set-1", currency: "IRT" });
     prismaMock.file.findMany.mockResolvedValue([]);
 
@@ -335,7 +349,8 @@ describe("getInvoicePreviewData — finalized rows read snapshots only", () => {
     expect(model.currency).toBe("IRT");
   });
 
-  it("defaults to IRR when no InvoiceSettings row exists", async () => {
+  it("defaults a legacy finalized row to IRR when no InvoiceSettings row exists", async () => {
+    getInvoiceMock.mockResolvedValue(finalizedRecord({ currency: null }));
     prismaMock.invoiceSettings.findUnique.mockResolvedValue(null);
     prismaMock.file.findMany.mockResolvedValue([]);
 
@@ -388,6 +403,13 @@ describe("getInvoicePreviewData — drafts read current profile / customer", () 
 
     expect(prismaMock.customer.findUnique).not.toHaveBeenCalled();
     expect(model.customer).toBeNull();
+  });
+
+  it("uses the current InvoiceSettings currency for drafts", async () => {
+    prismaMock.invoiceSettings.findUnique.mockResolvedValue({ id: "set-1", currency: "IRT" });
+
+    const model = await getInvoicePreviewData("biz-1", "inv-draft");
+    expect(model.currency).toBe("IRT");
   });
 
   it("falls back to the business name when no profile row exists", async () => {

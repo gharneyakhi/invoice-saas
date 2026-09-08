@@ -507,6 +507,62 @@ otherwise. Create mode stays inert until the business exists.
   Root cause unchanged: `binaries.prisma.sh` is blocked, so `prisma generate`
   cannot run.
 
+## 9b. Invoice Editor V2 — live preview + two independent exits (completed)
+
+`/dashboard/invoices/new` (and `?invoiceId=<draft>` for an existing draft) now
+shows the real invoice document while the user composes it, and offers the two
+outcomes directly instead of forcing a draft-save step first.
+
+### What changed
+
+| Area | Change |
+| --- | --- |
+| Live preview | `InvoiceLivePreview` renders the **same** `InvoicePreviewDocument` (PR #18) from the **current form state** — including unsaved edits. Customer, item titles, quantities, prices, line/global discounts, VAT, notes and branding all update the document without a save or a server round-trip. |
+| Shared model | The pure preview model was extracted from `previewService` into `@/lib/invoice-preview-model` (re-exported unchanged from `previewService`, so every existing import keeps working). The saved-invoice route and the editor's live preview therefore share one model builder and one snapshot law — no second invoice design. |
+| Totals | `@/lib/invoice-live-preview` runs the existing `calculateInvoice` engine (`decimal.js`) over the live form values. No new money math; the server still recalculates authoritatively on save and at finalization. |
+| Branding | The route now also loads `previewService.getDraftPreviewContext(businessId)` — current `BusinessProfile` + already-resolved logo/stamp/signature urls + currency. Read-only; missing `STORAGE_PUBLIC_BASE_URL`/assets resolve to `null` and the document simply omits them (no invented urls, editor keeps working). |
+| Two exits | `InvoiceEditorActionsBar` exposes **ذخیره پیش‌نویس** and **صدور نهایی** as siblings. `runEditorSubmitFlow` (`src/components/invoice/invoiceEditorFlow.ts`) sequences them: draft = `createDraftInvoice`/`updateDraftInvoice`; issue = persist current state (creating the draft internally when needed) then the **existing** `finalizeInvoice` action. Quota, entitlements, numbering, snapshots, the finalize transaction and payment-status derivation stay exactly where they were — nothing was duplicated. |
+| Confirmation | `FinalizeInvoiceDialog` (shared `Dialog`) asks "پس از صدور نهایی، فاکتور قابل ویرایش نخواهد بود…" with انصراف / صدور نهایی, shows what is being issued (customer, row count, payable total from the engine) and cannot be dismissed or double-pressed while the request runs. `createEditorSubmitGuard` is the matching one-at-a-time lock. |
+| After issuing | The official number, status and totals come from the server result; the editor becomes read-only and hands over to `/dashboard/invoices/[invoiceId]` (which already offers پیش‌نمایش / چاپ). |
+| Mobile | Below `lg`, a ویرایش / پیش‌نمایش tab bar toggles **visibility only** — both panes stay mounted, so switching tabs can never drop unsaved input. On `lg+` the layout is two columns: form beside a scaled, fit-to-width A4 sheet. |
+| Save state | "تغییرات ذخیره نشده" / "ذخیره شد" / "در حال ذخیره…" next to the CTAs and a ذخیره‌نشده badge on the preview; the preview is never gated by save state. |
+
+### Invariants deliberately left untouched
+
+* Draft architecture (`createDraftInvoice` / `updateDraftInvoice`, `DRAFT-…`
+  placeholder numbers, quota only on finalization) — unchanged.
+* Snapshot law: finalized/cancelled rows read `InvoiceSellerSnapshot` /
+  `InvoiceCustomerSnapshot` only; the current `BusinessProfile`/`Customer` are
+  consulted for drafts only (now additionally in the editor preview, where by
+  construction the row is a draft).
+* `/dashboard/invoices/[invoiceId]/preview` and `InvoicePreviewDocument`
+  markup/CSS: unchanged (only the type import moved to the shared model module).
+* No PDF, no S3, Gmail, Telegram or Excel changes. `DraftSaveBar` was replaced
+  by `InvoiceEditorActionsBar`. Branding/currency snapshot schema lands in §9c.
+
+### Verification
+
+* `npm test` — 41 files / 853 tests; the only failure is the pre-existing
+  `src/lib/finalization.test.ts` "UNAUTHORIZED contains ورود" assertion, which
+  also fails on `main` (its expected substring does not match the shipped copy).
+  90 new tests were added (`main`: 742 → now 853): `invoice-live-preview.test.ts`,
+  `invoice-editor-state.test.ts`, `invoice-editor-messages.test.ts`,
+  `invoiceEditorFlow.test.ts`, `invoiceDocumentRender.test.tsx`
+  (render-level document + action-bar smoke tests),
+  `draftPreviewContext.test.ts`, `invoiceFinalizeAction.test.ts`.
+* `npx tsc --noEmit` — identical error set to `main` (only the 9 stub-`@prisma/client`
+  errors described in §9, none from this milestone).
+* `npx eslint .` — clean.
+* `npx next build` — `✓ Compiled successfully`; the build then stops at
+  *Collecting page data* on `@prisma/client did not initialize yet`
+  (same blocked-engine limitation as §9, and identical on `main`).
+* `src/server/invoice/previewModel.test.ts` now imports the extracted model
+  module instead of `previewService`, so its 21 snapshot-law tests load and pass
+  in environments without a generated Prisma client (they were skipped/failed to
+  collect here on `main`).
+* `vitest.config.ts` sets the same automatic JSX runtime Next uses, so pure
+  presentational components can be rendered in the node test environment.
+
 ## 10. Running locally (once you have the above)
 
 ```bash

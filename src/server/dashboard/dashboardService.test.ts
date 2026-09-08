@@ -4,6 +4,7 @@ import Decimal from "decimal.js";
 const prismaMock = vi.hoisted(() => ({
   account: { findUnique: vi.fn() },
   invoice: { aggregate: vi.fn(), findMany: vi.fn() },
+  invoiceSettings: { findUnique: vi.fn() },
 }));
 
 const requireSession = vi.hoisted(() => vi.fn());
@@ -89,6 +90,7 @@ beforeEach(() => {
     _sum: { remainingAmount: new Decimal("0"), paidAmount: new Decimal("0") },
   });
   prismaMock.invoice.findMany.mockResolvedValue([]);
+  prismaMock.invoiceSettings.findUnique.mockResolvedValue({ currency: "IRR" });
 });
 
 describe("getDashboardData", () => {
@@ -223,6 +225,7 @@ describe("getDashboardData", () => {
         total: new Decimal("100000.00"),
         paidAmount: new Decimal("100000.00"),
         remainingAmount: new Decimal("0.00"),
+        currency: "IRR",
         issueDate: new Date("2026-03-05T00:00:00.000Z"),
         dueDate: null,
         finalizedAt: new Date("2026-03-05T01:00:00.000Z"),
@@ -245,6 +248,7 @@ describe("getDashboardData", () => {
         total: true,
         paidAmount: true,
         remainingAmount: true,
+        currency: true,
         issueDate: true,
         dueDate: true,
         finalizedAt: true,
@@ -286,6 +290,7 @@ describe("getDashboardData", () => {
         total: new Decimal("125000.50"),
         paidAmount: new Decimal("10.25"),
         remainingAmount: new Decimal("124990.25"),
+        currency: "IRT",
         issueDate: new Date("2026-03-05T00:00:00.000Z"),
         dueDate: null,
         finalizedAt: null,
@@ -307,5 +312,57 @@ describe("getDashboardData", () => {
     expect(data.recentInvoices[0]?.paidAmount).toBe("10.25");
     // Round-trips cleanly through JSON
     expect(JSON.parse(JSON.stringify(data)).totals.pendingAmount).toBe("125000.50");
+  });
+
+  it("uses the current InvoiceSettings currency (IRT) for dashboard totals", async () => {
+    const { getDashboardData } = await import("./dashboardService");
+    prismaMock.invoiceSettings.findUnique.mockResolvedValue({ currency: "IRT" });
+
+    const data = await getDashboardData();
+
+    expect(data.totals.currency).toBe("IRT");
+    expect(prismaMock.invoiceSettings.findUnique).toHaveBeenCalledWith({
+      where: { businessId: "biz-1" },
+      select: { currency: true },
+    });
+  });
+
+  it("carries each recent invoice's snapshotted currency (null for drafts)", async () => {
+    const { getDashboardData } = await import("./dashboardService");
+    prismaMock.invoice.findMany.mockResolvedValue([
+      {
+        id: "inv-draft",
+        invoiceNumber: "DRAFT-1",
+        invoiceType: "FINAL",
+        status: "DRAFT",
+        total: new Decimal("1000.00"),
+        paidAmount: new Decimal("0.00"),
+        remainingAmount: new Decimal("1000.00"),
+        currency: null,
+        issueDate: new Date("2026-03-05T00:00:00.000Z"),
+        dueDate: null,
+        finalizedAt: null,
+        createdAt: new Date("2026-03-05T00:00:00.000Z"),
+      },
+      {
+        id: "inv-final",
+        invoiceNumber: "101",
+        invoiceType: "FINAL",
+        status: "PAID",
+        total: new Decimal("2000.00"),
+        paidAmount: new Decimal("2000.00"),
+        remainingAmount: new Decimal("0.00"),
+        currency: "IRT",
+        issueDate: new Date("2026-03-05T00:00:00.000Z"),
+        dueDate: null,
+        finalizedAt: new Date("2026-03-05T01:00:00.000Z"),
+        createdAt: new Date("2026-03-05T00:00:00.000Z"),
+      },
+    ]);
+
+    const data = await getDashboardData();
+
+    expect(data.recentInvoices[0]?.currency).toBeNull();
+    expect(data.recentInvoices[1]?.currency).toBe("IRT");
   });
 });

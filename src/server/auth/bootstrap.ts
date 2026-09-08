@@ -54,7 +54,7 @@ export async function bootstrapUserOnGoogleLogin(input: GoogleLoginInput): Promi
     throw new Error("googleId and email are required to bootstrap a user");
   }
 
-  return prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const user = await tx.user.upsert({
       where: { googleId: input.googleId },
       update: {

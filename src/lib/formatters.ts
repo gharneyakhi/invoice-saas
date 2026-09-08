@@ -1,4 +1,5 @@
 import type { DashboardInvoiceStatus } from "@/server/dashboard/dashboardService";
+import { invoiceCurrencyLabel } from "@/lib/currency";
 
 /**
  * Persian number and locale formatters for the SaaS UI.
@@ -27,18 +28,36 @@ export function formatPersianNumber(value: number | string | null | undefined): 
 }
 
 /**
- * Formats monetary amounts in Iranian currency (IRR / ریال) with Persian numerals.
+ * Formats monetary amounts in Iranian currency (ریال / تومان) with Persian numerals.
  */
 export function formatCurrency(
   amount: string | number | null | undefined,
-  currency: "IRR" | string = "IRR",
+  currency: "IRR" | "IRT" | string = "IRR",
 ): string {
-  if (amount === null || amount === undefined || amount === "") return "۰ ریال";
+  const unit = invoiceCurrencyLabel(currency);
+  if (amount === null || amount === undefined || amount === "") return `۰ ${unit}`;
   const num = typeof amount === "number" ? amount : Number(amount);
-  if (isNaN(num)) return "۰ ریال";
+  if (isNaN(num)) return `۰ ${unit}`;
   const formatted = Math.round(num).toLocaleString("en-US");
-  const currencyLabel = currency === "IRR" ? "ریال" : currency;
-  return `${toPersianDigits(formatted)} ${currencyLabel}`;
+  return `${toPersianDigits(formatted)} ${unit}`;
+}
+
+/** Persian label for a stored InvoicePayment.method value. */
+export function formatPaymentMethod(method: string | null | undefined): string {
+  switch (method) {
+    case "CASH":
+      return "نقد";
+    case "CARD":
+      return "کارت";
+    case "BANK_TRANSFER":
+      return "انتقال بانکی";
+    case "ONLINE":
+      return "آنلاین";
+    case "OTHER":
+      return "سایر";
+    default:
+      return method && method.trim() !== "" ? method : "—";
+  }
 }
 
 /**

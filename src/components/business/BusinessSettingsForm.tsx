@@ -99,6 +99,7 @@ function toFormValues(props: BusinessSettingsFormProps): BusinessSettingsFormFie
     accountNumber: profile?.accountNumber ?? "",
     iban: profile?.iban ?? "",
     primaryColor: profile?.primaryColor ?? "",
+    footerBackgroundColor: profile?.footerBackgroundColor ?? "",
     footerText: profile?.footerText ?? "",
     defaultVatPercent: toNumericInputString(settings?.defaultVatPercent) || "0",
     currency: settings?.currency ?? "IRR",
@@ -121,6 +122,7 @@ function buildPayload(values: BusinessSettingsFormFields, mode: "create" | "edit
     accountNumber: values.accountNumber,
     iban: values.iban,
     primaryColor: values.primaryColor,
+    footerBackgroundColor: values.footerBackgroundColor,
     footerText: values.footerText,
   };
   if (mode === "create") {
@@ -162,7 +164,9 @@ export function BusinessSettingsForm(props: BusinessSettingsFormProps) {
   const nameValue = watch("name");
   const sloganValue = watch("slogan");
   const colorValue = watch("primaryColor");
+  const footerColorValue = watch("footerBackgroundColor");
   const validColor = /^#[0-9a-f]{6}$/i.test(colorValue) ? colorValue : "";
+  const validFooterColor = /^#[0-9a-f]{6}$/i.test(footerColorValue) ? footerColorValue : "";
 
   // Unsaved-changes guard: warn before the tab is closed/reloaded while dirty.
   React.useEffect(() => {
@@ -337,21 +341,21 @@ export function BusinessSettingsForm(props: BusinessSettingsFormProps) {
             <CardTitle className="text-sm font-bold">هویت بصری</CardTitle>
           </div>
           <CardDescription>
-            رنگ برند و لوگو در پیش‌نمایش و فاکتورهای این کسب‌وکار استفاده می‌شود.
+            رنگ سازمانی پس‌زمینه سربرگ فاکتور است و رنگ پاورقی پس‌زمینه نوار پایین سند.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-5 lg:grid-cols-2">
           <div className="space-y-4">
             <Field
-              label="رنگ برند"
+              label="رنگ سازمانی"
               htmlFor="business-color"
               error={errors.primaryColor?.message}
-              hint="کد هگز، مثال #2563eb — خالی یعنی رنگ پیش‌فرض"
+              hint="رنگ پس‌زمینه سربرگ فاکتور — خالی یعنی رنگ پیش‌فرض"
             >
               <div className="flex items-center gap-2">
                 <input
                   type="color"
-                  aria-label="انتخاب رنگ برند"
+                  aria-label="انتخاب رنگ سازمانی"
                   className="h-9 w-12 shrink-0 cursor-pointer rounded-lg border border-gray-300 bg-white p-1"
                   value={validColor || "#2563eb"}
                   disabled={inputDisabled}
@@ -365,6 +369,35 @@ export function BusinessSettingsForm(props: BusinessSettingsFormProps) {
                   disabled={inputDisabled}
                   placeholder="#2563eb"
                   {...register("primaryColor")}
+                />
+              </div>
+            </Field>
+
+            <Field
+              label="رنگ پاورقی"
+              htmlFor="business-footer-color"
+              error={errors.footerBackgroundColor?.message}
+              hint="رنگ پس‌زمینه پاورقی"
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="color"
+                  aria-label="انتخاب رنگ پاورقی"
+                  className="h-9 w-12 shrink-0 cursor-pointer rounded-lg border border-gray-300 bg-white p-1"
+                  value={validFooterColor || "#f3f4f6"}
+                  disabled={inputDisabled}
+                  onChange={(event) =>
+                    setValue("footerBackgroundColor", event.target.value, { shouldDirty: true })
+                  }
+                />
+                <Input
+                  id="business-footer-color"
+                  dir="ltr"
+                  className="text-left"
+                  hasError={Boolean(errors.footerBackgroundColor)}
+                  disabled={inputDisabled}
+                  placeholder="#f3f4f6"
+                  {...register("footerBackgroundColor")}
                 />
               </div>
             </Field>
@@ -383,26 +416,27 @@ export function BusinessSettingsForm(props: BusinessSettingsFormProps) {
           {/* Live letterhead preview */}
           <div className="rounded-xl border border-gray-200 bg-gray-50/60 p-4">
             <p className="mb-3 text-[11px] font-medium text-gray-400">پیش‌نمایش سربرگ فاکتور</p>
-            <div className="rounded-lg border border-gray-200 bg-white p-4">
-              <div className="flex items-center gap-3">
-                <div
-                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-base font-bold text-white"
-                  style={{ backgroundColor: validColor || "#2563eb" }}
-                >
+            <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+              <div
+                className="flex items-center gap-3 px-4 py-3 text-white"
+                style={{ backgroundColor: validColor || "#2563eb" }}
+              >
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-white/15 text-base font-bold">
                   {(nameValue.trim().charAt(0) || "ک")}
                 </div>
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-bold text-gray-900">
+                  <p className="truncate text-sm font-bold">
                     {nameValue.trim() || "نام کسب‌وکار"}
                   </p>
-                  <p className="truncate text-xs text-gray-500">
+                  <p className="truncate text-xs opacity-90">
                     {sloganValue.trim() || "شعار کسب‌وکار"}
                   </p>
                 </div>
               </div>
               <div
-                className="mt-3 h-1 rounded-full"
-                style={{ backgroundColor: validColor || "#2563eb" }}
+                className="h-2"
+                style={{ backgroundColor: validFooterColor || "#f3f4f6" }}
+                aria-hidden="true"
               />
             </div>
           </div>
@@ -557,17 +591,17 @@ export function BusinessSettingsForm(props: BusinessSettingsFormProps) {
                 label="واحد پول"
                 htmlFor="business-currency"
                 error={errors.currency?.message}
-                hint="کد ۳ حرفی، مثال IRR"
+                hint="ریال یا تومان — فاکتورهای نهایی‌شده واحد خود را نگه می‌دارند"
               >
-                <Input
+                <Select
                   id="business-currency"
-                  dir="ltr"
-                  className="text-left"
                   hasError={Boolean(errors.currency)}
                   disabled={inputDisabled}
-                  placeholder="IRR"
                   {...register("currency")}
-                />
+                >
+                  <option value="IRR">ریال</option>
+                  <option value="IRT">تومان</option>
+                </Select>
               </Field>
               <Field label="تقویم" htmlFor="business-calendar" error={errors.calendar?.message}>
                 <Select

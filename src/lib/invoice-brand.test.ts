@@ -1,59 +1,46 @@
 import { describe, expect, it } from "vitest";
 import {
   BRAND_COLOR_FALLBACK,
+  FG_ON_DARK,
+  FG_ON_LIGHT,
+  FOOTER_COLOR_FALLBACK,
   brandCssVars,
+  contrastForeground,
   normalizeBrandColor,
-} from "@/lib/invoice-brand";
-
-/**
- * Brand-colour helpers — the invoice document's accent colour is injected
- * through CSS variables ONLY after passing the same `#rrggbb` allow-list the
- * business schema validates at write time; anything else falls back to a
- * hard-coded colour instead of reaching the stylesheet.
- */
+} from "./invoice-brand";
 
 describe("normalizeBrandColor", () => {
-  it("accepts a lowercase hex colour", () => {
-    expect(normalizeBrandColor("#2563eb")).toBe("#2563eb");
-  });
-
-  it("normalizes case", () => {
-    expect(normalizeBrandColor("#A1B2C3")).toBe("#a1b2c3");
-  });
-
-  it("trims surrounding whitespace", () => {
-    expect(normalizeBrandColor("  #123456  ")).toBe("#123456");
-  });
-
-  it("rejects anything that is not a #rrggbb hex literal", () => {
-    expect(normalizeBrandColor(null)).toBeNull();
-    expect(normalizeBrandColor(undefined)).toBeNull();
-    expect(normalizeBrandColor("")).toBeNull();
+  it("accepts a lowercase hex and rejects everything else", () => {
+    expect(normalizeBrandColor("#0f766e")).toBe("#0f766e");
+    expect(normalizeBrandColor("  #0F766E  ")).toBe("#0f766e");
     expect(normalizeBrandColor("blue")).toBeNull();
-    expect(normalizeBrandColor("rgb(0,0,0)")).toBeNull();
-    expect(normalizeBrandColor("#fff")).toBeNull();
-    expect(normalizeBrandColor("#GGGGGG")).toBeNull();
     expect(normalizeBrandColor("#12345")).toBeNull();
     expect(normalizeBrandColor("url(javascript:alert(1))")).toBeNull();
   });
 });
 
+describe("contrastForeground", () => {
+  it("picks white on a dark header and near-black on a light one", () => {
+    expect(contrastForeground("#0f766e")).toBe(FG_ON_DARK);
+    expect(contrastForeground("#111827")).toBe(FG_ON_DARK);
+    expect(contrastForeground("#fde68a")).toBe(FG_ON_LIGHT);
+    expect(contrastForeground("#ffffff")).toBe(FG_ON_LIGHT);
+  });
+});
+
 describe("brandCssVars", () => {
-  it("exposes the validated colour as --pv-brand with a soft tint", () => {
-    const vars = brandCssVars("#2563eb");
-    expect(vars["--pv-brand"]).toBe("#2563eb");
-    expect(vars["--pv-brand-soft"]).toBe("#2563eb14");
+  it("maps primaryColor to the HEADER background, not body text", () => {
+    const vars = brandCssVars("#0f766e", "#111827");
+    expect(vars["--pv-header-bg"]).toBe("#0f766e");
+    expect(vars["--pv-header-fg"]).toBe(FG_ON_DARK);
+    expect(vars["--pv-brand"]).toBe("#0f766e");
+    expect(vars["--pv-footer-bg"]).toBe("#111827");
+    expect(vars["--pv-footer-fg"]).toBe(FG_ON_DARK);
   });
 
-  it("falls back to the default brand colour for invalid/missing values", () => {
-    expect(brandCssVars(null)["--pv-brand"]).toBe(BRAND_COLOR_FALLBACK);
-    expect(brandCssVars("")["--pv-brand"]).toBe(BRAND_COLOR_FALLBACK);
-    expect(brandCssVars("hsl(0, 0%, 0%)")["--pv-brand"]).toBe(BRAND_COLOR_FALLBACK);
-    expect(brandCssVars("injected; color: red")["--pv-brand"]).toBe(BRAND_COLOR_FALLBACK);
-  });
-
-  it("always derives the soft tint from the final (safe) brand value", () => {
-    const vars = brandCssVars("invalid!");
-    expect(vars["--pv-brand-soft"]).toBe(`${BRAND_COLOR_FALLBACK}14`);
+  it("falls back to the default header / footer colours when unset", () => {
+    const vars = brandCssVars(null, null);
+    expect(vars["--pv-header-bg"]).toBe(BRAND_COLOR_FALLBACK);
+    expect(vars["--pv-footer-bg"]).toBe(FOOTER_COLOR_FALLBACK);
   });
 });

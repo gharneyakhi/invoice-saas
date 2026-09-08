@@ -113,6 +113,7 @@ export function DashboardOverview({ data }: DashboardOverviewProps) {
           <RecentInvoicesTable
             invoices={recentInvoices}
             hasBusiness={Boolean(currentBusiness)}
+            fallbackCurrency={totals.currency}
           />
         </div>
 

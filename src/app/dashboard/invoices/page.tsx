@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { listBusinesses } from "@/server/business/businessService";
 import { listCustomers } from "@/server/customer/customerService";
-import { queryInvoices } from "@/server/invoice/invoiceService";
+import { getInvoiceSettings, queryInvoices } from "@/server/invoice/invoiceService";
 import { parseInvoiceListQuery } from "@/server/invoice/schema";
 import { toInvoiceListDTO } from "@/server/actions/dto";
 import { ValidationError } from "@/server/errors";
@@ -124,11 +124,12 @@ export default async function InvoicesPage({ searchParams = {} }: InvoicesPagePr
   // --- Query (validated + authorized server-side) ---------------------------
   let list: ReturnType<typeof toInvoiceListDTO> | null = null;
   let customers: { id: string; name: string }[] = [];
+  let fallbackCurrency = "IRR";
   let errorMessage: string | null = null;
 
   try {
     const query = buildQuery(searchParams);
-    const [result, customerRecords] = await Promise.all([
+    const [result, customerRecords, settings] = await Promise.all([
       queryInvoices(business.id, {
         ...(query.search ? { search: query.search } : {}),
         ...(query.statuses ? { statuses: query.statuses } : {}),
@@ -143,9 +144,11 @@ export default async function InvoicesPage({ searchParams = {} }: InvoicesPagePr
         pageSize: query.pageSize,
       }),
       listCustomers(business.id),
+      getInvoiceSettings(business.id),
     ]);
     list = toInvoiceListDTO(result);
     customers = customerRecords.map((customer) => ({ id: customer.id, name: customer.name }));
+    fallbackCurrency = settings?.currency ?? "IRR";
   } catch (error) {
     if (error instanceof UnauthorizedError || error instanceof ForbiddenError) {
       redirect("/login");
@@ -237,7 +240,7 @@ export default async function InvoicesPage({ searchParams = {} }: InvoicesPagePr
             </div>
           ) : (
             <>
-              <InvoiceListTable rows={list.rows} />
+              <InvoiceListTable rows={list.rows} fallbackCurrency={fallbackCurrency} />
               <InvoiceListPagination
                 page={list.page}
                 pageCount={list.pageCount}

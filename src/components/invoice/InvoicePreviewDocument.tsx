@@ -1,6 +1,7 @@
 import * as React from "react";
 import type { CSSProperties } from "react";
 import { brandCssVars } from "@/lib/invoice-brand";
+import { invoiceCurrencyLabel } from "@/lib/currency";
 import {
   formatCurrency,
   formatInvoiceStatus,
@@ -13,25 +14,31 @@ import type {
   InvoicePreviewCustomer,
   InvoicePreviewModel,
   InvoicePreviewSeller,
-} from "@/server/invoice/previewService";
+} from "@/lib/invoice-preview-model";
 
 /**
- * Invoice Preview / Print Document V1 (server-rendered, Persian RTL, A4-ready).
+ * Invoice Preview / Print Document V1 (Persian RTL, A4-ready).
+ *
+ * Rendered by BOTH the server route `/dashboard/invoices/[invoiceId]/preview`
+ * and the invoice editor's live preview — the two only differ in where their
+ * `InvoicePreviewModel` came from, never in markup or styling.
  *
  * This component renders ONE invoice exactly as it must be presented to a
  * customer — the letterhead, invoice meta, seller/customer parties, line-item
  * table, totals, payment state, notes and stamp/signature images — for both
  * the on-screen preview and the A4 print output of the browser.
  *
- * Data law (enforced upstream by `previewService`, rendered verbatim here):
+ * Data law (enforced upstream by `@/lib/invoice-preview-model` — the model
+ * this component renders — and rendered verbatim here):
  *   - DRAFT rows show the CURRENT BusinessProfile / live Customer;
  *   - FINALIZED / CANCELLED rows show the immutable finalization snapshots;
  *   - all money/percent/date values come from the authoritative server DTO
  *     and are only FORMATTED here — this component performs no financial
  *     math and re-computes nothing.
  *
- * No client-side hooks: it is pure server markup, so the same tree can later
- * feed a PDF generator without restructuring.
+ * No hooks and no client state: it is pure markup over a model, so the same
+ * tree serves server rendering, the editor's live preview and, later, a PDF
+ * generator — without restructuring and without recomputing anything.
  */
 
 // ---------------------------------------------------------------------------
@@ -57,7 +64,7 @@ function percentLabel(value: string | null | undefined): string {
 }
 
 function currencyUnit(currency: string): string {
-  return currency === "IRR" ? "ریال" : currency;
+  return invoiceCurrencyLabel(currency);
 }
 
 /** Joins non-empty optional lines of the letterhead with a separator. */
@@ -79,7 +86,38 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-/** Letterhead: brand (right) + document title & key meta (left, tinted panel). */
+/**
+ * Colored header strip: logo + name + slogan sit on the brand BACKGROUND.
+ * Foreground colour is auto-computed from luminance (no font-color setting).
+ */
+function BrandHeader({ seller }: { seller: InvoicePreviewSeller | null }) {
+  return (
+    <header
+      className="flex items-center gap-4 px-5 py-5 sm:px-9 print:px-[12mm] print:py-[8mm]"
+      style={{ backgroundColor: "var(--pv-header-bg)", color: "var(--pv-header-fg)" }}
+      aria-label="سربرگ فاکتور"
+    >
+      {seller?.logo?.url && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={seller.logo.url}
+          alt="لوگوی کسب‌وکار"
+          className="h-16 w-16 shrink-0 rounded-lg border border-white/40 bg-white object-contain p-1"
+        />
+      )}
+      <div className="min-w-0 space-y-0.5">
+        <h2 className="text-xl font-extrabold leading-snug">
+          {seller?.businessName ?? "—"}
+        </h2>
+        {seller?.slogan && (
+          <p className="text-[11px] leading-relaxed opacity-90">{seller.slogan}</p>
+        )}
+      </div>
+    </header>
+  );
+}
+
+/** Contact / banking (right) + document title & key meta (left). */
 function Letterhead({
   model,
   seller,
@@ -102,32 +140,14 @@ function Letterhead({
   );
 
   return (
-    <header className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
-      {/* Seller brand */}
+    <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
+      {/* Seller contact / banking — identity lives in the colored header. */}
       <section className="min-w-0 flex-1 space-y-3" aria-label="فروشنده">
-        <div className="flex items-start gap-3">
-          {seller?.logo?.url && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={seller.logo.url}
-              alt="لوگوی کسب‌وکار"
-              className="h-14 w-14 shrink-0 rounded-lg border border-gray-200 bg-white object-contain p-0.5"
-            />
-          )}
-          <div className="min-w-0 space-y-0.5">
-            <h2 className="text-xl font-extrabold leading-snug text-[color:var(--pv-brand)]">
-              {seller?.businessName ?? "—"}
-            </h2>
-            {seller?.slogan && (
-              <p className="text-[11px] leading-relaxed text-gray-500">{seller.slogan}</p>
-            )}
-            {seller?.ownerName && (
-              <p className="text-[11px] leading-relaxed text-gray-600">
-                مدیر / صاحب امتیاز: {seller.ownerName}
-              </p>
-            )}
-          </div>
-        </div>
+        {seller?.ownerName && (
+          <p className="text-[11px] leading-relaxed text-gray-600">
+            مدیر / صاحب امتیاز: {seller.ownerName}
+          </p>
+        )}
 
         {contacts && (
           <p className="text-[11px] leading-relaxed text-gray-600" dir="auto">
@@ -176,7 +196,7 @@ function Letterhead({
         aria-label="شناسه فاکتور"
       >
         <div className="space-y-1">
-          <h1 className="text-2xl font-black tracking-tight text-[color:var(--pv-brand)]">
+          <h1 className="text-2xl font-black tracking-tight text-gray-900">
             {documentTypeLabel}
           </h1>
           <p className="text-[11px] text-gray-500">فروش کالا و خدمات</p>
@@ -209,7 +229,7 @@ function Letterhead({
           </div>
         </div>
       </section>
-    </header>
+    </div>
   );
 }
 
@@ -220,7 +240,7 @@ function CustomerSection({ customer }: { customer: InvoicePreviewCustomer | null
   return (
     <section className="avoid-break rounded-xl border border-gray-200 p-4" aria-label="مشتری">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h3 className="text-xs font-bold text-[color:var(--pv-brand)]">
+        <h3 className="text-xs font-bold text-gray-900">
           مشتری / گیرنده
         </h3>
         <span className="text-sm font-extrabold text-gray-900">{customer.name}</span>
@@ -382,7 +402,7 @@ function TotalsSection({ model }: { model: InvoicePreviewModel }) {
       <span
         className={`font-sans ${
           strong
-            ? "text-base font-extrabold text-[color:var(--pv-brand)]"
+            ? "text-base font-extrabold text-gray-900"
             : "text-[11px] font-medium text-gray-800"
         }`}
       >
@@ -396,7 +416,7 @@ function TotalsSection({ model }: { model: InvoicePreviewModel }) {
       className="avoid-break h-fit rounded-xl border border-gray-200 p-4"
       aria-label="خلاصه مالی"
     >
-      <h3 className="mb-2 border-b border-gray-100 pb-2 text-xs font-bold text-[color:var(--pv-brand)]">
+      <h3 className="mb-2 border-b border-gray-100 pb-2 text-xs font-bold text-gray-900">
         خلاصه مالی
       </h3>
       <div className="space-y-0.5">
@@ -436,7 +456,7 @@ function NotesSection({ model }: { model: InvoicePreviewModel }) {
 
   return (
     <section className="avoid-break rounded-xl border border-gray-200 p-4" aria-label="توضیحات">
-      <h3 className="mb-2 text-xs font-bold text-[color:var(--pv-brand)]">توضیحات</h3>
+      <h3 className="mb-2 text-xs font-bold text-gray-900">توضیحات</h3>
       <p className="whitespace-pre-line text-[11px] leading-relaxed text-gray-600">{invoice.notes}</p>
     </section>
   );
@@ -472,15 +492,28 @@ function StampSignatureSection({ seller }: { seller: InvoicePreviewSeller | null
   );
 }
 
-/** Document footer strip — seller footerText when present. */
+/** Colored footer strip — always rendered when a footer colour or text is set. */
 function DocumentFooter({ seller }: { seller: InvoicePreviewSeller | null }) {
-  if (!seller?.footerText) return null;
+  const hasColor = Boolean(seller?.footerBackgroundColor);
+  const hasText = Boolean(seller?.footerText);
+  if (!hasColor && !hasText) return null;
 
   return (
-    <footer className="mt-8 border-t border-gray-200 pt-3">
-      <p className="whitespace-pre-line text-center text-[10px] leading-relaxed text-gray-500">
-        {seller.footerText}
-      </p>
+    <footer
+      className="px-5 py-3 sm:px-9 print:px-[12mm]"
+      style={{
+        backgroundColor: "var(--pv-footer-bg)",
+        color: "var(--pv-footer-fg)",
+      }}
+      aria-label="پاورقی فاکتور"
+    >
+      {seller?.footerText ? (
+        <p className="whitespace-pre-line text-center text-[10px] leading-relaxed">
+          {seller.footerText}
+        </p>
+      ) : (
+        <div className="h-2" aria-hidden="true" />
+      )}
     </footer>
   );
 }
@@ -495,18 +528,25 @@ export interface InvoicePreviewDocumentProps {
 
 /**
  * The A4 invoice document. `model` is the fully authorized, server-assembled
- * preview payload (see `previewService.getInvoicePreviewData`).
+ * preview payload (see `previewService.getInvoicePreviewData` for saved
+ * invoices and `@/lib/invoice-live-preview` for the editor's unsaved state).
  */
 export function InvoicePreviewDocument({ model }: InvoicePreviewDocumentProps) {
   const seller = model.seller;
-  const style = brandCssVars(seller?.primaryColor) as unknown as CSSProperties;
+  const style = brandCssVars(
+    seller?.primaryColor,
+    seller?.footerBackgroundColor,
+  ) as unknown as CSSProperties;
 
   return (
-    <div className="invoice-print-sheet mx-auto w-full bg-white text-gray-900 shadow-xl ring-1 ring-gray-200 md:w-[210mm]">
-      {/* Brand accent rule */}
-      <div className="h-2 w-full bg-[color:var(--pv-brand)] print:h-[3mm]" aria-hidden="true" />
+    <div
+      className="invoice-print-sheet mx-auto w-full overflow-hidden bg-white text-gray-900 shadow-xl ring-1 ring-gray-200 md:w-[210mm]"
+      dir="rtl"
+      style={style}
+    >
+      <BrandHeader seller={seller} />
 
-      <div className="px-5 py-7 sm:px-9 print:px-[12mm] print:py-[8mm]" dir="rtl" style={style}>
+      <div className="px-5 py-7 sm:px-9 print:px-[12mm] print:py-[8mm]">
         <div className="space-y-5">
           <Letterhead model={model} seller={seller} />
           <CustomerSection customer={model.customer} />
@@ -518,9 +558,10 @@ export function InvoicePreviewDocument({ model }: InvoicePreviewDocumentProps) {
             </div>
             <TotalsSection model={model} />
           </div>
-          <DocumentFooter seller={seller} />
         </div>
       </div>
+
+      <DocumentFooter seller={seller} />
     </div>
   );
 }

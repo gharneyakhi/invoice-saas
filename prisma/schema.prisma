@@ -192,7 +192,10 @@ model BusinessProfile {
   logoFileId            String?
   sellerStampFileId     String?
   sellerSignatureFileId String?
+  /// Header (letterhead) background on the invoice document.
   primaryColor          String?
+  /// Footer strip background on the invoice document.
+  footerBackgroundColor String?
   footerText            String?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
@@ -394,6 +397,10 @@ model Invoice {
   total                 Decimal @default(0) @db.Decimal(14, 2)
   paidAmount            Decimal @default(0) @db.Decimal(14, 2)
   remainingAmount       Decimal @default(0) @db.Decimal(14, 2)
+  /// Snapshotted at finalization from InvoiceSettings.currency. Drafts stay
+  /// NULL and keep reading the live setting; finalized/cancelled rows never
+  /// pick up a later settings change.
+  currency              String?
 
   notes       String?
   createdAt   DateTime  @default(now())
@@ -475,7 +482,10 @@ model InvoiceSellerSnapshot {
   logoFileId            String?
   sellerStampFileId     String?
   sellerSignatureFileId String?
+  /// Frozen header background colour at finalization.
   primaryColor          String?
+  /// Frozen footer background colour at finalization.
+  footerBackgroundColor String?
   footerText            String?
 
   @@map("invoice_seller_snapshots")

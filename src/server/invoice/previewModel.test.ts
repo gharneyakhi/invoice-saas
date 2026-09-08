@@ -1,23 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import Decimal from "decimal.js";
 import type { InvoiceRecord } from "@/server/invoice/invoiceService";
 
-// The module under test is value-imported; its server-side dependencies
-// (session/auth modules) must not evaluate in the node test environment.
-vi.mock("@/server/auth/requireBusinessOwnership", () => ({
-  requireBusinessOwnership: vi.fn(),
-}));
-vi.mock("@/server/auth/requireSession", () => {
-  class UnauthorizedError extends Error {}
-  class ForbiddenError extends Error {}
-  class NotFoundError extends Error {}
-  return {
-    UnauthorizedError,
-    ForbiddenError,
-    NotFoundError,
-    requireSession: vi.fn(),
-  };
-});
 import {
   buildInvoicePreviewModel,
   previewLifecycle,
@@ -25,10 +9,15 @@ import {
   type BuildInvoicePreviewModelInput,
   type PreviewImages,
   type PreviewProfileSource,
-} from "@/server/invoice/previewService";
+} from "@/lib/invoice-preview-model";
 
 /**
  * Pure preview-model tests (no DB, no mocks).
+ *
+ * The builder under test lives in `@/lib/invoice-preview-model` (it is shared
+ * with the editor's live preview), which is why this suite imports it from
+ * there instead of from `previewService` — and why it needs no mocks at all:
+ * the model layer touches neither Prisma nor the session.
  *
  * These pin the data-source law of the preview: DRAFT rows read the CURRENT
  * profile/customer; FINALIZED / CANCELLED rows read the immutable snapshots
@@ -78,6 +67,7 @@ function invoiceRow(overrides: Partial<Record<string, unknown>> = {}): InvoiceRe
     total: MONEY("196200"),
     paidAmount: MONEY("50000"),
     remainingAmount: MONEY("146200"),
+    currency: "IRR",
     notes: "یادداشت فاکتور",
     createdAt: new Date("2026-03-05T00:00:00.000Z"),
     updatedAt: new Date("2026-03-05T00:00:00.000Z"),
@@ -101,6 +91,7 @@ function invoiceRow(overrides: Partial<Record<string, unknown>> = {}): InvoiceRe
       sellerStampFileId: null,
       sellerSignatureFileId: "file-sign-snap",
       primaryColor: "#0055ff",
+      footerBackgroundColor: "#111827",
       footerText: "با تشکر (snapshot)",
     },
     customerSnapshot: {
@@ -134,6 +125,7 @@ const CURRENT_PROFILE: PreviewProfileSource = {
   sellerStampFileId: "file-stamp-profile",
   sellerSignatureFileId: "file-sign-profile",
   primaryColor: "#123456",
+  footerBackgroundColor: "#fde68a",
   footerText: "پانوشت جدید profile",
 };
 
@@ -171,6 +163,7 @@ function draftRow(overrides: Partial<Record<string, unknown>> = {}): InvoiceReco
     finalizedAt: null,
     paidAmount: MONEY("0"),
     remainingAmount: MONEY("196200"),
+    currency: null,
     sellerSnapshot: null,
     customerSnapshot: null,
     ...overrides,
@@ -206,6 +199,7 @@ describe("preview model — FINALIZED rows read the immutable snapshots", () => 
     expect(model.seller?.accountNumber).toBe("0000000001");
     expect(model.seller?.iban).toBe("IR000000000000000000000001");
     expect(model.seller?.primaryColor).toBe("#0055ff");
+    expect(model.seller?.footerBackgroundColor).toBe("#111827");
     expect(model.seller?.footerText).toBe("با تشکر (snapshot)");
   });
 
@@ -298,6 +292,7 @@ describe("preview model — DRAFT rows read the current profile / live customer"
     expect(model.seller?.businessName).toBe(CURRENT_PROFILE.businessName);
     expect(model.seller?.address).toBe(CURRENT_PROFILE.address);
     expect(model.seller?.primaryColor).toBe(CURRENT_PROFILE.primaryColor);
+    expect(model.seller?.footerBackgroundColor).toBe(CURRENT_PROFILE.footerBackgroundColor);
     expect(model.seller?.footerText).toBe(CURRENT_PROFILE.footerText);
     expect(model.seller?.logo?.fileId).toBe("file-logo-profile");
     expect(model.seller?.sellerStamp?.fileId).toBe("file-stamp-profile");

@@ -4,6 +4,7 @@ import { listBusinesses } from "@/server/business/businessService";
 import { getInvoiceQuotaStatus } from "@/server/entitlements/invoiceQuota";
 import { prisma } from "@/lib/prisma";
 import { requireSession } from "@/server/auth/requireSession";
+import { DEFAULT_INVOICE_CURRENCY, normalizeInvoiceCurrency } from "@/lib/currency";
 
 /**
  * Dashboard data assembly (server-side, application boundary).
@@ -77,6 +78,8 @@ export interface DashboardRecentInvoiceDTO {
   total: string;
   paidAmount: string;
   remainingAmount: string;
+  /** Snapshotted currency; `null` on drafts (dashboard falls back to settings). */
+  currency: string | null;
   issueDate: string;
   dueDate: string | null;
   finalizedAt: string | null;
@@ -92,7 +95,8 @@ export interface DashboardData {
   totals: {
     pendingAmount: string;
     paidAmount: string;
-    currency: "IRR";
+    /** Current InvoiceSettings.currency of the business (ریال / تومان). */
+    currency: string;
   };
   recentInvoices: DashboardRecentInvoiceDTO[];
 }
@@ -154,6 +158,7 @@ interface RecentInvoiceRow {
   total: { toString(): string };
   paidAmount: { toString(): string };
   remainingAmount: { toString(): string };
+  currency: string | null;
   issueDate: Date;
   dueDate: Date | null;
   finalizedAt: Date | null;
@@ -169,6 +174,7 @@ function toRecentInvoiceDTO(row: RecentInvoiceRow): DashboardRecentInvoiceDTO {
     total: moneyToFixed(row.total),
     paidAmount: moneyToFixed(row.paidAmount),
     remainingAmount: moneyToFixed(row.remainingAmount),
+    currency: row.currency ?? null,
     issueDate: toIso(row.issueDate) ?? "",
     dueDate: toIso(row.dueDate),
     finalizedAt: toIso(row.finalizedAt),
@@ -215,20 +221,30 @@ export async function getDashboardData(options: DashboardOptions = {}): Promise<
 
   // 4. Money totals for the current business — SQL-side sums (no invoice rows
   //    loaded). Scope: finalized (issued...) invoices that are not cancelled.
-  let totals: DashboardData["totals"] = { pendingAmount: "0", paidAmount: "0", currency: "IRR" };
+  let totals: DashboardData["totals"] = {
+    pendingAmount: "0",
+    paidAmount: "0",
+    currency: DEFAULT_INVOICE_CURRENCY,
+  };
   if (currentBusiness) {
-    const aggregate = await prisma.invoice.aggregate({
-      where: {
-        businessId: currentBusiness.id,
-        finalizedAt: { not: null },
-        status: { not: "CANCELLED" },
-      },
-      _sum: { remainingAmount: true, paidAmount: true },
-    });
+    const [aggregate, settings] = await Promise.all([
+      prisma.invoice.aggregate({
+        where: {
+          businessId: currentBusiness.id,
+          finalizedAt: { not: null },
+          status: { not: "CANCELLED" },
+        },
+        _sum: { remainingAmount: true, paidAmount: true },
+      }),
+      prisma.invoiceSettings.findUnique({
+        where: { businessId: currentBusiness.id },
+        select: { currency: true },
+      }),
+    ]);
     totals = {
       pendingAmount: moneyToFixed(aggregate?._sum?.remainingAmount ?? null),
       paidAmount: moneyToFixed(aggregate?._sum?.paidAmount ?? null),
-      currency: "IRR",
+      currency: normalizeInvoiceCurrency(settings?.currency),
     };
   }
 
@@ -249,6 +265,7 @@ export async function getDashboardData(options: DashboardOptions = {}): Promise<
         total: true,
         paidAmount: true,
         remainingAmount: true,
+        currency: true,
         issueDate: true,
         dueDate: true,
         finalizedAt: true,

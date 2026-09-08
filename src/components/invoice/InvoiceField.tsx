@@ -47,7 +47,7 @@ export function InvoiceField({
   const descriptionId = React.useId();
 
   return (
-    <div className={clsx("space-y-1.5 min-w-0", className)}>
+    <div className={clsx("space-y-1.5", className)}>
       <label htmlFor={htmlFor} className="block text-xs font-medium text-gray-700">
         {label}
         {required && (

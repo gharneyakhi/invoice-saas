@@ -22,6 +22,7 @@ function draftRow(overrides: Partial<Record<string, unknown>> = {}): InvoiceReco
     total: { toString: () => "109000" } as unknown as import("decimal.js").default,
     paidAmount: { toString: () => "0" } as unknown as import("decimal.js").default,
     remainingAmount: { toString: () => "109000" } as unknown as import("decimal.js").default,
+    currency: null,
     notes: "پیش‌نویس",
     createdAt: new Date("2026-03-05"),
     updatedAt: new Date("2026-03-05"),
@@ -79,6 +80,7 @@ function finalizedRow(overrides: Partial<Record<string, unknown>> = {}): Invoice
     id: "inv-final-1",
     businessId: "biz-1",
     customerId: "cust-1",
+    currency: "IRR",
     sellerSnapshot: {
       id: "snap-seller-1",
       invoiceId: "inv-final-1",
@@ -96,6 +98,7 @@ function finalizedRow(overrides: Partial<Record<string, unknown>> = {}): Invoice
       sellerStampFileId: null,
       sellerSignatureFileId: null,
       primaryColor: "#0055ff",
+      footerBackgroundColor: "#111827",
       footerText: "از خرید شما سپاسگزاریم",
     },
     customerSnapshot: {
