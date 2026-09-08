@@ -71,7 +71,7 @@ export function InvoiceItemsEditor({ products, currency }: InvoiceItemsEditorPro
           </p>
         )}
 
-        <div className="min-w-0">
+        <div className="@container min-w-0">
           {fields.map((field, index) => (
             <InvoiceItemRow
               key={field.id}
