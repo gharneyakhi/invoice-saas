@@ -46,7 +46,7 @@ describe("invoice finalization UI helpers", () => {
 
 describe("finalization error mapping", () => {
   it("maps each stable action error code to a clear Persian message", () => {
-    expect(finalizationErrorMessage({ code: "UNAUTHORIZED", message: "Unauthorized" })).toContain("وارد");
+    expect(finalizationErrorMessage({ code: "UNAUTHORIZED", message: "Unauthorized" })).toContain("ورود");
     expect(finalizationErrorMessage({ code: "FORBIDDEN", message: "Forbidden" })).toContain("دسترسی");
     expect(finalizationErrorMessage({ code: "NOT_FOUND", message: "Invoice not found" })).toContain("یافت نشد");
     expect(finalizationErrorMessage({ code: "INVOICE_LIMIT_REACHED", message: "Invoice limit reached" })).toContain("سقف");
