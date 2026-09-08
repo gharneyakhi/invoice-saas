@@ -20,6 +20,9 @@ const businessSvc = vi.hoisted(() => ({
   updateBusiness: vi.fn(),
   archiveBusiness: vi.fn(),
   setPrimaryBusiness: vi.fn(),
+  getBusinessSettings: vi.fn(),
+  updateBusinessSettings: vi.fn(),
+  uploadBusinessImage: vi.fn(),
 }));
 
 const customerSvc = vi.hoisted(() => ({
@@ -113,6 +116,52 @@ function businessRecord(overrides: Partial<Record<string, unknown>> = {}) {
     createdAt: new Date("2026-03-01T00:00:00.000Z"),
     updatedAt: new Date("2026-03-02T00:00:00.000Z"),
     archivedAt: null,
+    ...overrides,
+  };
+}
+
+/** Composed `BusinessSettingsRecord` returned by the business service. */
+function businessSettingsRecord(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    business: businessRecord(),
+    profile: {
+      id: "profile-1",
+      businessId: "biz-1",
+      businessName: "کسب‌وکار من",
+      slogan: "کیفیت و اعتماد",
+      ownerName: null,
+      address: "تهران",
+      email: "info@example.com",
+      mobile: "09123456789",
+      landline: null,
+      cardNumber: "6104337812345678",
+      accountNumber: null,
+      iban: "IR017000000001234567890123",
+      logoFileId: "file-1",
+      sellerStampFileId: null,
+      sellerSignatureFileId: null,
+      primaryColor: "#1e64ff",
+      footerText: null,
+      createdAt: new Date("2026-03-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-03-02T00:00:00.000Z"),
+    },
+    invoiceSettings: {
+      id: "settings-1",
+      businessId: "biz-1",
+      invoicePrefix: "1405-",
+      nextInvoiceNumber: 7,
+      defaultVatPercent: new Decimal("9.00"),
+      currency: "IRR",
+      calendar: "JALALI" as const,
+      defaultTemplate: "default",
+      createdAt: new Date("2026-03-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-03-02T00:00:00.000Z"),
+    },
+    images: {
+      logo: { fileId: "file-1", originalName: "logo.png", url: null },
+      sellerStamp: null,
+      sellerSignature: null,
+    },
     ...overrides,
   };
 }
@@ -337,6 +386,157 @@ describe("business actions", () => {
       success: true,
       data: expect.objectContaining({ id: "biz-2", isPrimary: true }),
     });
+  });
+
+  it("creates a business with the full creation-form payload (profile fields pass through)", async () => {
+    const { createBusiness } = await import("./businessActions");
+    businessSvc.createBusiness.mockResolvedValue(businessRecord({ id: "biz-9" }));
+
+    const payload = {
+      name: "کسب‌وکار جدید",
+      slogan: "شعار",
+      email: "info@example.com",
+      mobile: "09123456789",
+      cardNumber: "6104337812345678",
+      iban: "IR017000000001234567890123",
+      primaryColor: "#1e64ff",
+    };
+    const result = await createBusiness(payload);
+
+    expect(businessSvc.createBusiness).toHaveBeenCalledWith(payload);
+    expect(result).toEqual({ success: true, data: expect.objectContaining({ id: "biz-9" }) });
+  });
+
+  it("returns the settings record through getBusinessSettings with a safe DTO", async () => {
+    const { getBusinessSettings } = await import("./businessActions");
+    businessSvc.getBusinessSettings.mockResolvedValue(businessSettingsRecord());
+
+    const result = await getBusinessSettings("biz-1");
+
+    expect(businessSvc.getBusinessSettings).toHaveBeenCalledWith("biz-1");
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    // Decimal -> string, Date -> ISO, accountId stripped, bytes never present.
+    expect(result.data.invoiceSettings?.defaultVatPercent).toBe("9.00");
+    expect(result.data.profile?.createdAt).toBe("2026-03-01T00:00:00.000Z");
+    expect(result.data.business).not.toHaveProperty("accountId");
+    expect(result.data.profile?.logo).toEqual({
+      fileId: "file-1",
+      originalName: "logo.png",
+      url: null,
+    });
+    const json = JSON.parse(JSON.stringify(result));
+    expect(json.data.invoiceSettings.defaultVatPercent).toBe("9.00");
+  });
+
+  it("saves business settings through updateBusinessSettings and serializes them", async () => {
+    const { updateBusinessSettings } = await import("./businessActions");
+    businessSvc.updateBusinessSettings.mockResolvedValue(
+      businessSettingsRecord({
+        business: businessRecord({ name: "نام جدید" }),
+      }),
+    );
+
+    const payload = {
+      name: "نام جدید",
+      slogan: "شعار",
+      invoiceSettings: { defaultVatPercent: "9", currency: "IRR", calendar: "JALALI" },
+    };
+    const result = await updateBusinessSettings("biz-1", payload);
+
+    expect(businessSvc.updateBusinessSettings).toHaveBeenCalledWith("biz-1", payload);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.business.name).toBe("نام جدید");
+    expect(result.data.invoiceSettings?.nextInvoiceNumber).toBe(7);
+  });
+
+  it("maps archived-business and cross-account settings rejections safely", async () => {
+    const { ValidationError } = await import("@/server/errors");
+    const { ForbiddenError } = await import("@/server/auth/requireSession");
+    const { updateBusinessSettings } = await import("./businessActions");
+
+    businessSvc.updateBusinessSettings.mockRejectedValueOnce(
+      new ValidationError("Cannot edit an archived business"),
+    );
+    const archived = await updateBusinessSettings("biz-1", { name: "x" });
+    expect(archived).toEqual({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "Cannot edit an archived business" },
+    });
+
+    businessSvc.updateBusinessSettings.mockRejectedValueOnce(
+      new ForbiddenError("Business does not belong to this account"),
+    );
+    const foreign = await updateBusinessSettings("biz-other", { name: "x" });
+    expect(foreign).toEqual({
+      success: false,
+      error: {
+        code: "FORBIDDEN",
+        message: "Business does not belong to this account",
+      },
+    });
+  });
+
+  it("maps the deferred-storage upload refusal to FILE_STORAGE_NOT_CONFIGURED", async () => {
+    const { FileStorageNotConfiguredError } = await import("@/server/errors");
+    const { uploadBusinessImage } = await import("./businessActions");
+
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new File([new Uint8Array([1, 2, 3])], "logo.png", { type: "image/png" }),
+    );
+    businessSvc.uploadBusinessImage.mockRejectedValue(
+      new FileStorageNotConfiguredError(
+        "Image uploads are not available yet: the S3-compatible file storage adapter is not configured.",
+      ),
+    );
+
+    const result = await uploadBusinessImage("biz-1", "BUSINESS_LOGO", formData);
+
+    expect(businessSvc.uploadBusinessImage).toHaveBeenCalledWith(
+      "biz-1",
+      "BUSINESS_LOGO",
+      formData,
+    );
+    expect(result).toEqual({
+      success: false,
+      error: {
+        code: "FILE_STORAGE_NOT_CONFIGURED",
+        message:
+          "Image uploads are not available yet: the S3-compatible file storage adapter is not configured.",
+      },
+    });
+  });
+
+  it("maps an invalid upload to VALIDATION_ERROR and requires auth before touching the service", async () => {
+    const { ValidationError } = await import("@/server/errors");
+    const { UnauthorizedError } = await import("@/server/auth/requireSession");
+    const { uploadBusinessImage } = await import("./businessActions");
+
+    const formData = new FormData();
+    formData.append("file", new File([new Uint8Array([1])], "x.pdf", { type: "application/pdf" }));
+
+    businessSvc.uploadBusinessImage.mockRejectedValueOnce(
+      new ValidationError("file: only image/png, image/jpeg, image/webp images are allowed"),
+    );
+    const invalid = await uploadBusinessImage("biz-1", "SELLER_STAMP", formData);
+    expect(invalid).toEqual({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "file: only image/png, image/jpeg, image/webp images are allowed",
+      },
+    });
+
+    requireSession.mockRejectedValue(new UnauthorizedError());
+    const unauth = await uploadBusinessImage("biz-1", "SELLER_STAMP", formData);
+    expect(unauth).toEqual({
+      success: false,
+      error: { code: "UNAUTHORIZED", message: "Unauthorized" },
+    });
+    expect(businessSvc.uploadBusinessImage).toHaveBeenCalledTimes(1);
   });
 });
 

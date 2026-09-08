@@ -571,3 +571,47 @@ export function SparklesIcon({ size = 20, className, ...props }: IconProps) {
     </svg>
   );
 }
+
+export function StampIcon({ size = 20, className, ...props }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M9 11V5a2 2 0 1 1 4 0v1.5A1.5 1.5 0 0 0 14.5 8H17a2 2 0 0 1 2 2v1" />
+      <path d="M5 18h14a1 1 0 0 0 1-1v-1a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1Z" />
+      <path d="M7 21h10" />
+    </svg>
+  );
+}
+
+export function ArchiveIcon({ size = 20, className, ...props }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+      {...props}
+    >
+      <rect x="3" y="4" width="18" height="4" rx="1" />
+      <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
+      <path d="M10 12h4" />
+    </svg>
+  );
+}
