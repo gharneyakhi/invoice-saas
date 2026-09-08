@@ -384,7 +384,104 @@ assert every query still uses the session account.
 - No atomic `invoiceCount` increment yet (Phase 4, with finalization).
 - No API routes, server actions, or UI — as instructed.
 
-## 9. Running locally (once you have the above)
+## 9. Business Management UI — Business Profile / Invoice Settings (completed)
+
+The real Business Management area: multiple businesses per account, each with
+an independent profile (letterhead info, visual identity, banking, stamp &
+signature, invoice settings). No mock UI — every form posts through the
+existing Server Action → service → Prisma path.
+
+### Routes added
+
+| Route | Purpose |
+|---|---|
+| `/dashboard/businesses` | List of the account's live businesses (logo/monogram, brand color, primary badge), business-limit quota card, create CTA (disabled + explained at the limit), per-card actions: settings / make primary / archive-with-confirmation |
+| `/dashboard/businesses/new` | Full creation form (name + all optional `BusinessProfile` fields); server-side entitlement gate renders a limit notice instead of the form |
+| `/dashboard/businesses/[businessId]` | Settings page in 5 sections (اطلاعات کسب‌وکار / هویت بصری / اطلاعات بانکی / مهر و امضا / فاکتور), live letterhead preview, unsaved-changes guard; archived businesses render read-only |
+
+Loading skeletons and a not-found state are included; the dashboard
+`BusinessSwitcher` now links to the real creation form and management hub.
+
+### Server Actions added/modified (`src/server/actions/businessActions.ts`)
+
+- `getBusinessSettings(businessId)` — read path for the settings page.
+- `updateBusinessSettings(businessId, input)` — one payload → one transaction
+  (`Business.name` + `BusinessProfile` + editable `InvoiceSettings` columns).
+- `uploadBusinessImage(businessId, category, formData)` — the image-upload
+  contract (see "File storage" below).
+- `createBusiness` / existing actions unchanged in signature; creation simply
+  accepts the extended profile payload.
+
+### Services (all inside the existing `businessService`, no duplicates)
+
+- `createBusiness` — now persists the optional profile fields provided by the
+  creation form (name-only payloads behave exactly as before).
+- `updateBusinessSettings` — ownership + archive rule + strict Zod payload +
+  name-mirror + invoice-settings update in one transaction.
+- `getBusinessSettings` / `listBusinessProfiles` — session-scoped reads with
+  image references resolved to public URLs.
+- `uploadBusinessImage` — ownership + archive rule + server-side type/size
+  validation, then the storage call (deferred, below).
+- `updateBusiness` — gained the same archived-business edit guard the invoice
+  service already applies (`ValidationError`), required by the archive rules.
+
+### Security invariants preserved
+
+- Every mutation derives the account from `requireSession()` and re-proves
+  business ownership via `requireBusinessOwnership()`; no client-supplied
+  `accountId`/`userId`/plan limit is ever trusted.
+- Creation is gated by the centralized entitlement check
+  (`entitlementCanCreateBusiness`) inside the same transaction as the write.
+- Profile payloads are `.strict()` Zod objects: `logoFileId` /
+  `sellerStampFileId` / `sellerSignatureFileId` (storage-owned),
+  `nextInvoiceNumber` (finalization-owned) and `accountId` are all rejected.
+- Changing a profile never touches `InvoiceSellerSnapshot` /
+  `InvoiceCustomerSnapshot` — finalized invoices stay immutable; drafts
+  continue reading the live profile exactly as before.
+
+### File storage — INTENTIONALLY DEFERRED
+
+The planned S3-compatible storage abstraction is **not wired yet**, and
+nothing fakes it (no fake S3, no base64-in-DB, no credentials in client
+code). `src/server/storage/storageService.ts` is the honest contract:
+
+- `validateImageUpload` — server-side MIME allow-list (PNG/JPEG/WebP) and 5 MB
+  size cap, enforced before any storage call.
+- `resolveFilePublicUrl` — public URL resolution from
+  `STORAGE_PUBLIC_BASE_URL` only (presigned URLs would be part of the future
+  adapter).
+- `putBusinessImage` — the single deferred integration point: it throws
+  `FileStorageNotConfiguredError` (mapped to the stable
+  `FILE_STORAGE_NOT_CONFIGURED` action code). Implementing it with a real
+  `PutObject` against the documented env vars plus flipping
+  `FILE_UPLOADS_ENABLED` activates the complete upload UI/Action/service path
+  with no other changes. Until then the upload zones render an explicit
+  "needs storage" notice instead of pretending.
+
+### Database schema
+
+**No changes.** Every exposed field already exists on `BusinessProfile` /
+`InvoiceSettings`; the initial migration is untouched.
+
+### Verification
+
+- `npx vitest run` → **608/609 passing**; the single failure
+  (`src/lib/finalization.test.ts` — a Persian message asserting "ورود" where
+  the code says "وارد حساب کاربری شوید") fails identically on pristine
+  `main` and is unrelated to this task (left untouched deliberately).
+  61 tests were added: business schema validation (21), storage contract (8),
+  business service profiles/settings/uploads (22 blocks incl. `it.each`),
+  action-boundary mapping/serialization (6 blocks).
+- `npx tsc --noEmit` → **zero new errors** (the 39 baseline errors all stem
+  from the un-generated Prisma client stub; none are in the new files).
+- `npx eslint .` → clean.
+- `npx next build` → **compiles and lints successfully**, but cannot finish
+  in this sandbox: the type gate trips on the pre-existing stub errors and
+  page-data collection fails loading the missing `.prisma/client` module (the
+  pre-existing `/api/auth/[...nextauth]` route). Root cause unchanged:
+  `binaries.prisma.sh` is blocked, so `prisma generate` cannot run.
+
+## 10. Running locally (once you have the above)
 
 ```bash
 npm install

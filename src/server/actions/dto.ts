@@ -1,5 +1,9 @@
 import Decimal from "decimal.js";
-import type { BusinessRecord } from "@/server/business/businessService";
+import type {
+  BusinessProfileRow,
+  BusinessRecord,
+  BusinessSettingsRecord,
+} from "@/server/business/businessService";
 import type { CustomerRecord } from "@/server/customer/customerService";
 import type { ProductRecord } from "@/server/product/productService";
 import type {
@@ -73,6 +77,112 @@ export function toBusinessDTO(row: BusinessRecord): BusinessDTO {
     createdAt: dateToIso(row.createdAt) ?? "",
     updatedAt: dateToIso(row.updatedAt) ?? "",
     archivedAt: dateToIso(row.archivedAt),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Business profile / settings (Business Management phase)
+// ---------------------------------------------------------------------------
+
+/** A stored profile image — only its reference and (public) URL, never bytes. */
+export interface BusinessImageRefDTO {
+  fileId: string;
+  originalName: string;
+  url: string | null;
+}
+
+export interface BusinessProfileDTO {
+  businessId: string;
+  businessName: string;
+  slogan: string | null;
+  ownerName: string | null;
+  address: string | null;
+  email: string | null;
+  mobile: string | null;
+  landline: string | null;
+  cardNumber: string | null;
+  accountNumber: string | null;
+  iban: string | null;
+  primaryColor: string | null;
+  footerText: string | null;
+  logo: BusinessImageRefDTO | null;
+  sellerStamp: BusinessImageRefDTO | null;
+  sellerSignature: BusinessImageRefDTO | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BusinessInvoiceSettingsDTO {
+  invoicePrefix: string | null;
+  nextInvoiceNumber: number;
+  defaultVatPercent: string;
+  currency: string;
+  calendar: "JALALI" | "GREGORIAN";
+  defaultTemplate: string;
+}
+
+export interface BusinessSettingsDTO {
+  business: BusinessDTO;
+  profile: BusinessProfileDTO | null;
+  invoiceSettings: BusinessInvoiceSettingsDTO | null;
+}
+
+function toBusinessImageRefDTO(
+  ref: BusinessSettingsRecord["images"]["logo"],
+): BusinessImageRefDTO | null {
+  return ref ? { fileId: ref.fileId, originalName: ref.originalName, url: ref.url } : null;
+}
+
+export function toBusinessProfileDTO(
+  row: BusinessProfileRow,
+  images?: BusinessSettingsRecord["images"],
+): BusinessProfileDTO {
+  return {
+    businessId: row.businessId,
+    businessName: row.businessName,
+    slogan: row.slogan,
+    ownerName: row.ownerName,
+    address: row.address,
+    email: row.email,
+    mobile: row.mobile,
+    landline: row.landline,
+    cardNumber: row.cardNumber,
+    accountNumber: row.accountNumber,
+    iban: row.iban,
+    primaryColor: row.primaryColor,
+    footerText: row.footerText,
+    logo: images ? toBusinessImageRefDTO(images.logo) : null,
+    sellerStamp: images ? toBusinessImageRefDTO(images.sellerStamp) : null,
+    sellerSignature: images ? toBusinessImageRefDTO(images.sellerSignature) : null,
+    createdAt: dateToIso(row.createdAt) ?? "",
+    updatedAt: dateToIso(row.updatedAt) ?? "",
+  };
+}
+
+export function toBusinessInvoiceSettingsDTO(
+  row: NonNullable<BusinessSettingsRecord["invoiceSettings"]>,
+): BusinessInvoiceSettingsDTO {
+  return {
+    invoicePrefix: row.invoicePrefix,
+    nextInvoiceNumber: row.nextInvoiceNumber,
+    defaultVatPercent: moneyToString(row.defaultVatPercent),
+    currency: row.currency,
+    calendar: row.calendar,
+    defaultTemplate: row.defaultTemplate,
+  };
+}
+
+/**
+ * Settings-page payload. Only the listed fields cross the server boundary:
+ * Dates become ISO strings, the VAT percent Decimal becomes a fixed string,
+ * image bytes never travel (references + public URLs only), and neither
+ * `accountId` nor storage internals appear anywhere.
+ */
+export function toBusinessSettingsDTO(row: BusinessSettingsRecord): BusinessSettingsDTO {
+  return {
+    business: toBusinessDTO(row.business),
+    profile: row.profile ? toBusinessProfileDTO(row.profile, row.images) : null,
+    invoiceSettings: row.invoiceSettings ? toBusinessInvoiceSettingsDTO(row.invoiceSettings) : null,
   };
 }
 

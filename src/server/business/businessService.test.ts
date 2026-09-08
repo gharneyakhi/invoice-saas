@@ -26,10 +26,21 @@ const prismaMock = vi.hoisted(() => ({
     deleteMany: vi.fn(),
   },
   businessProfile: {
+    findMany: vi.fn(),
+    findUnique: vi.fn(),
     create: vi.fn(),
+    createMany: vi.fn(),
+    update: vi.fn(),
     updateMany: vi.fn(),
+    upsert: vi.fn(),
   },
   invoiceSettings: {
+    findUnique: vi.fn(),
+    create: vi.fn(),
+    update: vi.fn(),
+  },
+  file: {
+    findMany: vi.fn(),
     create: vi.fn(),
   },
   subscription: {
@@ -115,6 +126,66 @@ function planRow(key: "FREE" | "BASIC" | "PRO", businessLimit: number, invoiceLi
     businessLimit,
     invoiceLimit,
     planFeatures: features.map((featureKey) => ({ enabled: true, feature: { key: featureKey } })),
+  };
+}
+
+/** Row shape of `business_profiles` for the profile/settings tests. */
+function profileRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "profile-1",
+    businessId: "biz-1",
+    businessName: "کسب‌وکار من",
+    slogan: null,
+    ownerName: null,
+    address: null,
+    email: null,
+    mobile: null,
+    landline: null,
+    cardNumber: null,
+    accountNumber: null,
+    iban: null,
+    logoFileId: null,
+    sellerStampFileId: null,
+    sellerSignatureFileId: null,
+    primaryColor: null,
+    footerText: null,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    ...overrides,
+  };
+}
+
+/** Row shape of `invoice_settings` (`defaultVatPercent` behaves like a Decimal). */
+function settingsRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "settings-1",
+    businessId: "biz-1",
+    invoicePrefix: null,
+    nextInvoiceNumber: 7,
+    defaultVatPercent: { toString: () => "9.00" },
+    currency: "IRR",
+    calendar: "JALALI",
+    defaultTemplate: "default",
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    ...overrides,
+  };
+}
+
+/** Row shape of `files` for the image-reference tests. */
+function fileRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "file-1",
+    accountId: "acc-1",
+    businessId: "biz-1",
+    storageKey: "businesses/biz-1/logo.png",
+    originalName: "logo.png",
+    mimeType: "image/png",
+    size: 1234,
+    category: "BUSINESS_LOGO",
+    createdAt: new Date("2026-01-02T00:00:00.000Z"),
+    deletedAt: null,
+    ...overrides,
   };
 }
 
@@ -776,3 +847,446 @@ describe("setPrimaryBusiness", () => {
   });
 });
 
+
+// ===========================================================================
+// Business Management phase — profiles, settings, uploads
+// ===========================================================================
+
+describe("createBusiness (profile fields)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("persists the provided profile fields on the BusinessProfile row", async () => {
+    const { createBusiness } = await import("./businessService");
+
+    prismaMock.subscription.findMany.mockResolvedValue([activeSubscription(PRO_PLAN())]);
+    prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
+    prismaMock.business.findMany.mockResolvedValue([]);
+    prismaMock.business.create.mockResolvedValue(businessRow({ id: "biz-2" }));
+
+    await createBusiness({
+      name: "شعبه دوم",
+      slogan: "کیفیت و اعتماد",
+      email: "info@example.com",
+      mobile: "09123456789",
+      cardNumber: "6104337812345678",
+      iban: "IR017000000001234567890123",
+      primaryColor: "#1e64ff",
+      footerText: "سپاس از خرید شما",
+    });
+
+    expect(prismaMock.businessProfile.create).toHaveBeenCalledWith({
+      data: {
+        businessId: "biz-2",
+        businessName: "شعبه دوم",
+        slogan: "کیفیت و اعتماد",
+        email: "info@example.com",
+        mobile: "09123456789",
+        cardNumber: "6104337812345678",
+        iban: "IR017000000001234567890123",
+        primaryColor: "#1e64ff",
+        footerText: "سپاس از خرید شما",
+      },
+    });
+  });
+
+  it("keeps the name-only creation payload exactly as before (backwards compatible)", async () => {
+    const { createBusiness } = await import("./businessService");
+
+    prismaMock.subscription.findMany.mockResolvedValue([activeSubscription(PRO_PLAN())]);
+    prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
+    prismaMock.business.findMany.mockResolvedValue([]);
+    prismaMock.business.create.mockResolvedValue(businessRow({ id: "biz-2" }));
+
+    await createBusiness({ name: "کسب‌وکار ساده" });
+
+    expect(prismaMock.businessProfile.create).toHaveBeenCalledWith({
+      data: { businessId: "biz-2", businessName: "کسب‌وکار ساده" },
+    });
+  });
+});
+
+describe("updateBusiness (archive rule)", () => {
+  it("rejects editing an archived business", async () => {
+    const { updateBusiness } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(
+      businessRow({ archivedAt: new Date("2026-02-01T00:00:00.000Z") }),
+    );
+
+    await expect(updateBusiness("biz-1", { name: "تلاش برای ویرایش" })).rejects.toBeInstanceOf(
+      ValidationError,
+    );
+    expect(prismaMock.business.update).not.toHaveBeenCalled();
+    expect(prismaMock.businessProfile.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("listBusinessProfiles", () => {
+  it("is scoped to the session account's live businesses only", async () => {
+    const { listBusinessProfiles } = await import("./businessService");
+
+    prismaMock.businessProfile.findMany.mockResolvedValue([profileRow()]);
+    prismaMock.file.findMany.mockResolvedValue([]);
+
+    const result = await listBusinessProfiles();
+
+    expect(prismaMock.businessProfile.findMany).toHaveBeenCalledWith({
+      where: { business: { accountId: "acc-1", archivedAt: null } },
+      orderBy: { businessId: "asc" },
+    });
+    expect(result.profiles).toHaveLength(1);
+  });
+
+  it("resolves referenced logo files to their public URLs (no credentials)", async () => {
+    const { listBusinessProfiles } = await import("./businessService");
+    const originalBase = process.env.STORAGE_PUBLIC_BASE_URL;
+    process.env.STORAGE_PUBLIC_BASE_URL = "https://cdn.example.com";
+
+    try {
+      prismaMock.businessProfile.findMany.mockResolvedValue([
+        profileRow({ logoFileId: "file-1" }),
+      ]);
+      prismaMock.file.findMany.mockResolvedValue([fileRow()]);
+
+      const result = await listBusinessProfiles();
+
+      expect(prismaMock.file.findMany).toHaveBeenCalledWith({
+        where: { id: { in: ["file-1"] }, deletedAt: null },
+      });
+      expect(result.filesById["file-1"]).toEqual({
+        id: "file-1",
+        url: "https://cdn.example.com/businesses/biz-1/logo.png",
+      });
+    } finally {
+      if (originalBase === undefined) {
+        delete process.env.STORAGE_PUBLIC_BASE_URL;
+      } else {
+        process.env.STORAGE_PUBLIC_BASE_URL = originalBase;
+      }
+    }
+  });
+
+  it("rejects when there is no valid session", async () => {
+    const { UnauthorizedError } = await import("@/server/auth/requireSession");
+    const { listBusinessProfiles } = await import("./businessService");
+
+    requireSession.mockRejectedValue(new UnauthorizedError());
+
+    await expect(listBusinessProfiles()).rejects.toBeInstanceOf(UnauthorizedError);
+    expect(prismaMock.businessProfile.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("getBusinessSettings", () => {
+  it("returns the composed settings record for an owned business", async () => {
+    const { getBusinessSettings } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+    prismaMock.businessProfile.findUnique.mockResolvedValue(profileRow({ logoFileId: "file-1" }));
+    prismaMock.invoiceSettings.findUnique.mockResolvedValue(settingsRow());
+    prismaMock.file.findMany.mockResolvedValue([fileRow()]);
+
+    const record = await getBusinessSettings("biz-1");
+
+    expect(record.business.id).toBe("biz-1");
+    expect(record.profile?.businessName).toBe("کسب‌وکار من");
+    expect(record.invoiceSettings?.nextInvoiceNumber).toBe(7);
+    expect(record.images.logo).toMatchObject({ fileId: "file-1", originalName: "logo.png" });
+    expect(record.images.sellerStamp).toBeNull();
+    expect(record.images.sellerSignature).toBeNull();
+  });
+
+  it("includes archived businesses (read-only views), with a null profile handled gracefully", async () => {
+    const { getBusinessSettings } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(
+      businessRow({ archivedAt: new Date("2026-02-01T00:00:00.000Z") }),
+    );
+    prismaMock.businessProfile.findUnique.mockResolvedValue(null);
+    prismaMock.invoiceSettings.findUnique.mockResolvedValue(null);
+
+    const record = await getBusinessSettings("biz-1");
+
+    expect(record.business.archivedAt).not.toBeNull();
+    expect(record.profile).toBeNull();
+    expect(record.invoiceSettings).toBeNull();
+    expect(record.images.logo).toBeNull();
+  });
+
+  it("propagates ForbiddenError for another account's business", async () => {
+    const { ForbiddenError } = await import("@/server/auth/requireSession");
+    const { getBusinessSettings } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(
+      businessRow({ id: "biz-other", accountId: "acc-other" }),
+    );
+
+    await expect(getBusinessSettings("biz-other")).rejects.toBeInstanceOf(ForbiddenError);
+    expect(prismaMock.businessProfile.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("propagates NotFoundError for a missing business", async () => {
+    const { NotFoundError } = await import("@/server/auth/requireSession");
+    const { getBusinessSettings } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(null);
+
+    await expect(getBusinessSettings("missing-id")).rejects.toBeInstanceOf(NotFoundError);
+  });
+});
+
+describe("updateBusinessSettings", () => {
+  function mockReloadedRows() {
+    prismaMock.businessProfile.findUnique.mockResolvedValue(
+      profileRow({ businessName: "نام جدید", slogan: "شعار تازه" }),
+    );
+    prismaMock.invoiceSettings.findUnique.mockResolvedValue(
+      settingsRow({ defaultVatPercent: { toString: () => "9.50" } }),
+    );
+  }
+
+  it("updates the name, profile and invoice settings in one transaction", async () => {
+    const { updateBusinessSettings } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+    const renamed = businessRow({ name: "نام جدید" });
+    prismaMock.business.update.mockResolvedValue(renamed);
+    prismaMock.businessProfile.upsert.mockResolvedValue(
+      profileRow({ businessName: "نام جدید" }),
+    );
+    prismaMock.invoiceSettings.findUnique.mockResolvedValueOnce({ id: "settings-1" }); // existence probe
+    prismaMock.invoiceSettings.update.mockResolvedValue(settingsRow());
+    mockReloadedRows();
+
+    const payload = {
+      name: "نام جدید",
+      slogan: "شعار تازه",
+      email: " info@example.com ",
+      mobile: "۰۹۱۲۳۴۵۶۷۸۹",
+      primaryColor: "#1E64FF",
+      invoiceSettings: {
+        defaultVatPercent: "9.5",
+        currency: "irr",
+        calendar: "GREGORIAN" as const,
+        invoicePrefix: "1405-",
+      },
+    };
+
+    const record = await updateBusinessSettings("biz-1", payload);
+
+    // Name mirror: Business.name + BusinessProfile.businessName move together.
+    expect(prismaMock.business.update).toHaveBeenCalledWith({
+      where: { id: "biz-1" },
+      data: { name: "نام جدید" },
+    });
+    expect(prismaMock.businessProfile.upsert).toHaveBeenCalledWith({
+      where: { businessId: "biz-1" },
+      create: expect.objectContaining({ businessId: "biz-1", businessName: "نام جدید" }),
+      update: expect.objectContaining({
+        businessName: "نام جدید",
+        slogan: "شعار تازه",
+        email: "info@example.com",
+        mobile: "09123456789",
+        primaryColor: "#1e64ff",
+      }),
+    });
+    // Invoice settings: only the editable columns, never nextInvoiceNumber.
+    expect(prismaMock.invoiceSettings.update).toHaveBeenCalledWith({
+      where: { businessId: "biz-1" },
+      data: {
+        defaultVatPercent: "9.5",
+        currency: "IRR",
+        calendar: "GREGORIAN",
+        invoicePrefix: "1405-",
+      },
+    });
+    const updateCall = prismaMock.invoiceSettings.update.mock.calls[0]?.[0] as {
+      data: Record<string, unknown>;
+    };
+    expect(updateCall.data).not.toHaveProperty("nextInvoiceNumber");
+
+    expect(record.business.name).toBe("نام جدید");
+    expect(record.profile?.slogan).toBe("شعار تازه");
+  });
+
+  it("skips the Business.update when the name is unchanged", async () => {
+    const { updateBusinessSettings } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+    prismaMock.businessProfile.upsert.mockResolvedValue(profileRow());
+    mockReloadedRows();
+
+    await updateBusinessSettings("biz-1", { name: "کسب‌وکار من", slogan: "شعار" });
+
+    expect(prismaMock.business.update).not.toHaveBeenCalled();
+    expect(prismaMock.businessProfile.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ businessName: "کسب‌وکار من", slogan: "شعار" }),
+      }),
+    );
+  });
+
+  it("creates the invoice settings row defensively when it is missing", async () => {
+    const { updateBusinessSettings } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+    prismaMock.businessProfile.upsert.mockResolvedValue(profileRow());
+    prismaMock.invoiceSettings.findUnique.mockResolvedValueOnce(null); // existence probe
+    prismaMock.invoiceSettings.create.mockResolvedValue(settingsRow());
+    mockReloadedRows();
+
+    await updateBusinessSettings("biz-1", {
+      name: "کسب‌وکار من",
+      invoiceSettings: { defaultVatPercent: "0" },
+    });
+
+    expect(prismaMock.invoiceSettings.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ businessId: "biz-1", defaultVatPercent: "0" }),
+    });
+  });
+
+  it("rejects editing an archived business", async () => {
+    const { updateBusinessSettings } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(
+      businessRow({ archivedAt: new Date("2026-02-01T00:00:00.000Z") }),
+    );
+
+    await expect(
+      updateBusinessSettings("biz-1", { name: "نام جدید" }),
+    ).rejects.toBeInstanceOf(ValidationError);
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.businessProfile.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.invoiceSettings.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects updating another account's business with ForbiddenError", async () => {
+    const { ForbiddenError } = await import("@/server/auth/requireSession");
+    const { updateBusinessSettings } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(
+      businessRow({ id: "biz-other", accountId: "acc-other" }),
+    );
+
+    await expect(
+      updateBusinessSettings("biz-other", { name: "هک" }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    expect(prismaMock.businessProfile.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["accountId", { name: "x", accountId: "acc-other" }],
+    ["logoFileId (storage-owned)", { name: "x", logoFileId: "file-1" }],
+    [
+      "nextInvoiceNumber via invoiceSettings",
+      { name: "x", invoiceSettings: { nextInvoiceNumber: 99 } },
+    ],
+    ["unknown key", { name: "x", whatever: 1 }],
+  ])("rejects a settings payload containing %s", async (_label, payload) => {
+    const { updateBusinessSettings } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+
+    await expect(updateBusinessSettings("biz-1", payload)).rejects.toBeInstanceOf(ValidationError);
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("uploadBusinessImage", () => {
+  function pngFormData(options: { type?: string; size?: number } = {}): FormData {
+    const bytes = new Uint8Array(options.size ?? 10);
+    const file = new File([bytes], "logo.png", { type: options.type ?? "image/png" });
+    const formData = new FormData();
+    formData.append("file", file);
+    return formData;
+  }
+
+  it("refuses honestly while the storage adapter is not wired (no fake success)", async () => {
+    const { uploadBusinessImage } = await import("./businessService");
+    const { FileStorageNotConfiguredError } = await import("@/server/errors");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+
+    await expect(
+      uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData()),
+    ).rejects.toBeInstanceOf(FileStorageNotConfiguredError);
+
+    // Nothing may be persisted while storage is unavailable.
+    expect(prismaMock.file.create).not.toHaveBeenCalled();
+    expect(prismaMock.businessProfile.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid mime type server-side before any storage call", async () => {
+    const { uploadBusinessImage } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+
+    await expect(
+      uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData({ type: "image/svg+xml" })),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("rejects an oversized file server-side", async () => {
+    const { uploadBusinessImage } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+
+    await expect(
+      uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData({ size: 6 * 1024 * 1024 })),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("rejects a payload without a real file", async () => {
+    const { uploadBusinessImage } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+
+    const formData = new FormData();
+    formData.append("file", "not-a-file");
+
+    await expect(
+      uploadBusinessImage("biz-1", "BUSINESS_LOGO", formData),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("rejects uploads for an archived business", async () => {
+    const { uploadBusinessImage } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(
+      businessRow({ archivedAt: new Date("2026-02-01T00:00:00.000Z") }),
+    );
+
+    await expect(
+      uploadBusinessImage("biz-1", "BUSINESS_LOGO", pngFormData()),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("rejects uploads for another account's business", async () => {
+    const { ForbiddenError } = await import("@/server/auth/requireSession");
+    const { uploadBusinessImage } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(
+      businessRow({ id: "biz-other", accountId: "acc-other" }),
+    );
+
+    await expect(
+      uploadBusinessImage("biz-other", "BUSINESS_LOGO", pngFormData()),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("rejects an unsupported category", async () => {
+    const { uploadBusinessImage } = await import("./businessService");
+
+    prismaMock.business.findUnique.mockResolvedValue(businessRow());
+
+    await expect(
+      uploadBusinessImage("biz-1", "GENERATED_PDF" as never, pngFormData()),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+});

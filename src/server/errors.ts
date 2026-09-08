@@ -48,3 +48,19 @@ export class EntitlementDataError extends Error {
     this.name = "EntitlementDataError";
   }
 }
+
+/**
+ * The S3-compatible file-storage adapter is not wired up yet (see
+ * `src/server/storage/storageService.ts` for the deliberately deferred
+ * integration point). Any upload attempt fails with this error instead of
+ * silently storing files somewhere they do not belong (base64 in the DB, a
+ * local disk path masquerading as object storage, ...).
+ */
+export class FileStorageNotConfiguredError extends Error {
+  readonly code = "FILE_STORAGE_NOT_CONFIGURED" as const;
+
+  constructor(message = "File storage is not configured") {
+    super(message);
+    this.name = "FileStorageNotConfiguredError";
+  }
+}

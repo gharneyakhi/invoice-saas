@@ -50,6 +50,7 @@ const FALLBACK_MESSAGES: Record<ActionErrorCode, string> = {
   INVOICE_LIMIT_REACHED: "سقف تعداد فاکتورهای نهایی‌شده در این ماه تکمیل شده است.",
   BUSINESS_LIMIT_REACHED: "سقف کسب‌وکارهای فعال تکمیل شده است.",
   ENTITLEMENT_DATA_ERROR: "اطلاعات اشتراک برای نهایی کردن در دسترس نیست. کمی بعد تلاش کنید.",
+  FILE_STORAGE_NOT_CONFIGURED: "سرویس ذخیره‌سازی فایل در دسترس نیست.",
   INTERNAL_ERROR: "خطای غیرمنتظره‌ای رخ داد. دوباره تلاش کنید و در صورت تکرار بعداً مراجعه کنید.",
 };
 

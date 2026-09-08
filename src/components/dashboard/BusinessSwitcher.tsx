@@ -170,7 +170,7 @@ export function BusinessSwitcher({
 
           <div className="pt-1.5 mt-1 border-t border-gray-100 space-y-0.5">
             <Link
-              href="/dashboard/businesses"
+              href="/dashboard/businesses/new"
               onClick={() => setIsOpen(false)}
               className="flex items-center gap-2 px-2.5 py-2 text-xs text-gray-700 hover:bg-gray-100 rounded-lg transition"
             >
@@ -178,12 +178,12 @@ export function BusinessSwitcher({
               <span>افزودن کسب‌وکار جدید</span>
             </Link>
             <Link
-              href="/dashboard/settings"
+              href="/dashboard/businesses"
               onClick={() => setIsOpen(false)}
               className="flex items-center gap-2 px-2.5 py-2 text-xs text-gray-500 hover:bg-gray-100 rounded-lg transition"
             >
               <SettingsIcon size={14} className="text-gray-400" />
-              <span>تنظیمات کسب‌وکار</span>
+              <span>مدیریت کسب‌وکارها</span>
             </Link>
           </div>
         </div>

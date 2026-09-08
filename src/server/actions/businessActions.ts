@@ -5,13 +5,22 @@ import {
   archiveBusiness as archiveBusinessService,
   createBusiness as createBusinessService,
   getBusiness as getBusinessService,
+  getBusinessSettings as getBusinessSettingsService,
   listBusinesses as listBusinessesService,
   setPrimaryBusiness as setPrimaryBusinessService,
   updateBusiness as updateBusinessService,
+  updateBusinessSettings as updateBusinessSettingsService,
+  uploadBusinessImage as uploadBusinessImageService,
   type ListBusinessesOptions,
 } from "@/server/business/businessService";
 import { runAction, type ActionResult } from "@/server/actions/actionResult";
-import { toBusinessDTO, type BusinessDTO } from "@/server/actions/dto";
+import {
+  toBusinessDTO,
+  toBusinessSettingsDTO,
+  type BusinessDTO,
+  type BusinessSettingsDTO,
+} from "@/server/actions/dto";
+import type { BusinessImageCategory } from "@/server/storage/storageService";
 
 /**
  * Business Server Actions — the application boundary between the React UI and
@@ -95,3 +104,51 @@ export async function setPrimaryBusiness(businessId: string): Promise<ActionResu
   });
 }
 
+
+/**
+ * Returns the full settings record of a business the caller owns (profile +
+ * invoice settings + resolved image references). Read path used by the
+ * settings page; archived businesses are included (rendered read-only).
+ */
+export async function getBusinessSettings(businessId: string): Promise<ActionResult<BusinessSettingsDTO>> {
+  return runAction(async () => {
+    await requireSession();
+    const record = await getBusinessSettingsService(businessId);
+    return toBusinessSettingsDTO(record);
+  });
+}
+
+/**
+ * Saves the settings page of a business the caller owns. Ownership, the
+ * archive rule, strict payload validation and the name-mirror convention all
+ * live in `businessService.updateBusinessSettings` (one transaction);
+ * `nextInvoiceNumber` and the profile file columns are never accepted here.
+ */
+export async function updateBusinessSettings(
+  businessId: string,
+  input: unknown,
+): Promise<ActionResult<BusinessSettingsDTO>> {
+  return runAction(async () => {
+    await requireSession();
+    const record = await updateBusinessSettingsService(businessId, input);
+    return toBusinessSettingsDTO(record);
+  });
+}
+
+/**
+ * Uploads one business image (logo / stamp / signature). Server-side
+ * validation of type/size and the ownership/archive rules run in the service;
+ * until the S3-compatible storage adapter is wired this deterministically
+ * returns FILE_STORAGE_NOT_CONFIGURED (never a silent fake success).
+ */
+export async function uploadBusinessImage(
+  businessId: string,
+  category: BusinessImageCategory,
+  formData: FormData,
+): Promise<ActionResult<BusinessSettingsDTO>> {
+  return runAction(async () => {
+    await requireSession();
+    const record = await uploadBusinessImageService(businessId, category, formData);
+    return toBusinessSettingsDTO(record);
+  });
+}

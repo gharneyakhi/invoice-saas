@@ -5,7 +5,18 @@ import { requireBusinessOwnership } from "@/server/auth/requireBusinessOwnership
 import { requireSession } from "@/server/auth/requireSession";
 import { BusinessLimitReachedError, EntitlementDataError, ValidationError } from "@/server/errors";
 import { entitlementCanCreateBusiness, resolveEntitlements } from "@/server/entitlements/entitlementService";
-import { parseCreateBusinessInput, parseUpdateBusinessInput } from "@/server/business/schema";
+import {
+  parseCreateBusinessInput,
+  parseUpdateBusinessInput,
+  parseUpdateBusinessSettingsInput,
+} from "@/server/business/schema";
+import {
+  isBusinessImageCategory,
+  putBusinessImage,
+  resolveFilePublicUrl,
+  validateImageUpload,
+  type BusinessImageCategory,
+} from "@/server/storage/storageService";
 
 /**
  * Business CRUD domain layer (Phase 3, server-side only).
@@ -52,6 +63,204 @@ export interface BusinessRecord {
 export interface ListBusinessesOptions {
   /** Archived businesses are hidden by default — archiving is a soft delete. */
   includeArchived?: boolean;
+}
+
+/**
+ * Row shape of the `business_profiles` table (mirrors `model BusinessProfile`
+ * in `prisma/schema.prisma`). Declared locally for the same reason as
+ * `BusinessRecord`: the generated Prisma model types only exist after
+ * `prisma generate`, which not every environment can run.
+ */
+export interface BusinessProfileRow {
+  id: string;
+  businessId: string;
+  businessName: string;
+  slogan: string | null;
+  ownerName: string | null;
+  address: string | null;
+  email: string | null;
+  mobile: string | null;
+  landline: string | null;
+  cardNumber: string | null;
+  accountNumber: string | null;
+  iban: string | null;
+  logoFileId: string | null;
+  sellerStampFileId: string | null;
+  sellerSignatureFileId: string | null;
+  primaryColor: string | null;
+  footerText: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * Row shape of a business' `invoice_settings` row. `defaultVatPercent` is a
+ * Prisma `Decimal` — represented structurally (like `dashboardService` does)
+ * so no generated-client type is needed and money never becomes a JS float.
+ */
+export interface BusinessInvoiceSettingsRow {
+  id: string;
+  businessId: string;
+  invoicePrefix: string | null;
+  nextInvoiceNumber: number;
+  defaultVatPercent: { toString(): string };
+  currency: string;
+  calendar: "JALALI" | "GREGORIAN";
+  defaultTemplate: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** A stored image of the business profile, with its resolved public URL. */
+export interface BusinessImageRef {
+  fileId: string;
+  originalName: string;
+  url: string | null;
+}
+
+/**
+ * The full settings payload of one business: the verified `Business` row, its
+ * `BusinessProfile`, its `InvoiceSettings` and the three profile images
+ * resolved through the storage layer. Reads include archived businesses
+ * (ownership does not stop at the archive flag; the settings page renders
+ * them read-only instead).
+ */
+export interface BusinessSettingsRecord {
+  business: BusinessRecord;
+  profile: BusinessProfileRow | null;
+  invoiceSettings: BusinessInvoiceSettingsRow | null;
+  images: {
+    logo: BusinessImageRef | null;
+    sellerStamp: BusinessImageRef | null;
+    sellerSignature: BusinessImageRef | null;
+  };
+}
+
+/** Minimal `File` row projection the profile loaders need. */
+interface FileRowProjection {
+  id: string;
+  storageKey: string;
+  originalName: string;
+  mimeType: string;
+}
+
+/** Result of `listBusinessProfiles`: account-scoped profiles + their files. */
+export interface BusinessProfileListResult {
+  profiles: BusinessProfileRow[];
+  filesById: Record<string, { id: string; url: string | null }>;
+}
+
+/** Maps a `FileCategory` to the `BusinessProfile` column that references it. */
+const IMAGE_CATEGORY_PROFILE_FIELD: Record<
+  BusinessImageCategory,
+  "logoFileId" | "sellerStampFileId" | "sellerSignatureFileId"
+> = {
+  BUSINESS_LOGO: "logoFileId",
+  SELLER_STAMP: "sellerStampFileId",
+  SELLER_SIGNATURE: "sellerSignatureFileId",
+};
+
+function profileImageFileIds(profile: BusinessProfileRow | null): string[] {
+  if (!profile) return [];
+  return [profile.logoFileId, profile.sellerStampFileId, profile.sellerSignatureFileId].filter(
+    (fileId): fileId is string => typeof fileId === "string" && fileId.length > 0,
+  );
+}
+
+/** Profile-field keys shared by the create and settings-update payloads. */
+const PROFILE_FIELD_KEYS = [
+  "slogan",
+  "ownerName",
+  "address",
+  "email",
+  "mobile",
+  "landline",
+  "cardNumber",
+  "accountNumber",
+  "iban",
+  "primaryColor",
+  "footerText",
+] as const;
+
+type ProfileFieldsSource = Partial<
+  Record<(typeof PROFILE_FIELD_KEYS)[number], string | null>
+>;
+
+/**
+ * Builds a `BusinessProfile` write payload from parsed input. Only *provided*
+ * keys are included (Prisma would treat `undefined` as "not set" anyway, but
+ * omitting absent keys keeps the write payloads — and their test assertions —
+ * exact), and `businessName` always mirrors `Business.name`.
+ */
+function buildProfileCreateData(
+  businessId: string,
+  businessName: string,
+  source: ProfileFieldsSource,
+): Record<string, string | null> & { businessId: string } {
+  return { businessId, ...buildProfileUpdateData(businessName, source) };
+}
+
+function buildProfileUpdateData(
+  businessName: string,
+  source: ProfileFieldsSource,
+): Record<string, string | null> {
+  const data: Record<string, string | null> = { businessName };
+  for (const key of PROFILE_FIELD_KEYS) {
+    const value = source[key];
+    if (value !== undefined) {
+      data[key] = value;
+    }
+  }
+  return data;
+}
+
+/**
+ * Loads the profile / invoice-settings / image-reference rows of an *already
+ * ownership-verified* business. Shared by every reader so the settings page,
+ * the action layer and the update path all see the same shape.
+ */
+async function loadBusinessSettings(
+  business: BusinessRecord,
+  client: Prisma.TransactionClient,
+): Promise<BusinessSettingsRecord> {
+  const profile = (await client.businessProfile.findUnique({
+    where: { businessId: business.id },
+  })) as unknown as BusinessProfileRow | null;
+
+  const invoiceSettings = (await client.invoiceSettings.findUnique({
+    where: { businessId: business.id },
+  })) as unknown as BusinessInvoiceSettingsRow | null;
+
+  const fileIds = profileImageFileIds(profile);
+  const files: FileRowProjection[] =
+    fileIds.length > 0
+      ? ((await client.file.findMany({
+          where: { id: { in: fileIds }, deletedAt: null },
+        })) as unknown as FileRowProjection[])
+      : [];
+  const filesById = new Map(files.map((file) => [file.id, file]));
+
+  const toImageRef = (fileId: string | null): BusinessImageRef | null => {
+    if (!fileId) return null;
+    const file = filesById.get(fileId);
+    if (!file) return null;
+    return {
+      fileId: file.id,
+      originalName: file.originalName,
+      url: resolveFilePublicUrl(file.storageKey),
+    };
+  };
+
+  return {
+    business,
+    profile: profile ?? null,
+    invoiceSettings: invoiceSettings ?? null,
+    images: {
+      logo: toImageRef(profile?.logoFileId ?? null),
+      sellerStamp: toImageRef(profile?.sellerStampFileId ?? null),
+      sellerSignature: toImageRef(profile?.sellerSignatureFileId ?? null),
+    },
+  };
 }
 
 /**
@@ -161,8 +370,11 @@ export async function createBusiness(input: unknown): Promise<BusinessRecord> {
       },
     });
 
+    // Optional profile fields provided by the creation form. Absent keys stay
+    // absent from the payload (never `undefined` keys), so a bare
+    // `{ name }` creation behaves exactly as before.
     await tx.businessProfile.create({
-      data: { businessId: business.id, businessName: data.name },
+      data: buildProfileCreateData(business.id, data.name, data),
     });
 
     // Not strictly a "business" field, but bootstrap.ts establishes that a
@@ -180,11 +392,18 @@ export async function createBusiness(input: unknown): Promise<BusinessRecord> {
  * Updates a business the caller owns. `accountId`, `id`, `isPrimary`,
  * `isLocked` and `archivedAt` are not updatable here — the update schema is
  * strict, so attempting it raises `ValidationError` instead of being ignored.
+ *
+ * Archived businesses are not editable (their history is preserved read-only);
+ * the same rule is enforced by `updateBusinessSettings` and
+ * `uploadBusinessImage` below.
  */
 export async function updateBusiness(businessId: string, input: unknown): Promise<BusinessRecord> {
   // Ownership is proven before the payload is even looked at, so an
   // unauthorized caller learns nothing about validation rules.
   const owned = await requireBusinessOwnership(businessId);
+  if (owned.archivedAt) {
+    throw new ValidationError("Cannot edit an archived business");
+  }
   const data = parseUpdateBusinessInput(input);
 
   return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
@@ -288,3 +507,206 @@ export async function setPrimaryBusiness(businessId: string): Promise<BusinessRe
   });
 }
 
+// ---------------------------------------------------------------------------
+// Business profile / settings management (Business Management phase)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lists the BusinessProfile rows of the authenticated account's *live*
+ * businesses (archived businesses are excluded — archiving hides a business
+ * from active lists), together with the referenced image files resolved to
+ * public URLs. Scoped by the session account only: the `where` filter goes
+ * through the `business` relation, so the query can never widen to another
+ * account.
+ */
+export async function listBusinessProfiles(): Promise<BusinessProfileListResult> {
+  const { accountId } = await requireSession();
+
+  const profiles = (await prisma.businessProfile.findMany({
+    where: { business: { accountId, archivedAt: null } },
+    orderBy: { businessId: "asc" },
+  })) as unknown as BusinessProfileRow[];
+
+  const fileIds = profiles.flatMap((profile) => profileImageFileIds(profile));
+  const files: FileRowProjection[] =
+    fileIds.length > 0
+      ? ((await prisma.file.findMany({
+          where: { id: { in: fileIds }, deletedAt: null },
+        })) as unknown as FileRowProjection[])
+      : [];
+
+  const filesById: BusinessProfileListResult["filesById"] = {};
+  for (const file of files) {
+    filesById[file.id] = { id: file.id, url: resolveFilePublicUrl(file.storageKey) };
+  }
+
+  return { profiles, filesById };
+}
+
+/**
+ * Returns the full settings record (business + profile + invoice settings +
+ * resolved images) of a business the caller owns. Archived businesses are
+ * included: ownership does not stop at the archive flag, and the settings
+ * page renders them read-only instead of hiding them.
+ */
+export async function getBusinessSettings(businessId: string): Promise<BusinessSettingsRecord> {
+  const owned = await requireBusinessOwnership(businessId);
+  return loadBusinessSettings(owned, prisma);
+}
+
+/**
+ * Saves the settings page of a business the caller owns: the business name,
+ * the client-writable `BusinessProfile` columns and (when provided) the
+ * editable `InvoiceSettings` columns — all in ONE transaction, so a failure
+ * cannot leave the name mirrored on one row only.
+ *
+ * Rules:
+ *   - Ownership is proven by `requireBusinessOwnership` before the payload is
+ *     parsed; cross-account ids propagate 404/403 untouched.
+ *   - Archived businesses are not editable (ValidationError).
+ *   - `nextInvoiceNumber` is never writable — official numbering stays owned
+ *     by the finalization transaction (see invoiceService.finalizeInvoice).
+ *   - Finalized-invoice snapshots (`InvoiceSellerSnapshot`) are NEVER touched:
+ *     profile edits only affect the current profile, which drafts read and
+ *     future finalizations snapshot.
+ *   - `Business.name` and `BusinessProfile.businessName` move together (the
+ *     same mirror convention as `updateBusiness` / `bootstrap.ts`).
+ */
+export async function updateBusinessSettings(
+  businessId: string,
+  input: unknown,
+): Promise<BusinessSettingsRecord> {
+  const owned = await requireBusinessOwnership(businessId);
+
+  if (owned.archivedAt) {
+    throw new ValidationError("Cannot edit an archived business");
+  }
+
+  const data = parseUpdateBusinessSettingsInput(input);
+
+  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    let current: BusinessRecord = owned;
+    if (data.name !== owned.name) {
+      current = await tx.business.update({
+        where: { id: owned.id }, // the verified row's id, not the raw client value
+        data: { name: data.name },
+      });
+    }
+
+    const profileData = buildProfileUpdateData(data.name, data);
+    await tx.businessProfile.upsert({
+      where: { businessId: owned.id },
+      create: { businessId: owned.id, ...profileData },
+      update: profileData,
+    });
+
+    if (data.invoiceSettings) {
+      const settingsData: Record<string, string | null> = {};
+      if (data.invoiceSettings.defaultVatPercent !== undefined) {
+        settingsData.defaultVatPercent = data.invoiceSettings.defaultVatPercent;
+      }
+      if (data.invoiceSettings.currency !== undefined) {
+        settingsData.currency = data.invoiceSettings.currency;
+      }
+      if (data.invoiceSettings.calendar !== undefined) {
+        settingsData.calendar = data.invoiceSettings.calendar;
+      }
+      if (data.invoiceSettings.invoicePrefix !== undefined) {
+        settingsData.invoicePrefix = data.invoiceSettings.invoicePrefix;
+      }
+
+      // bootstrap.ts / createBusiness establish one InvoiceSettings row per
+      // business; the create branch below is defensive repair, not a second
+      // numbering architecture.
+      const existing = await tx.invoiceSettings.findUnique({
+        where: { businessId: owned.id },
+        select: { id: true },
+      });
+      if (existing) {
+        await tx.invoiceSettings.update({
+          where: { businessId: owned.id },
+          data: settingsData,
+        });
+      } else {
+        await tx.invoiceSettings.create({
+          data: { businessId: owned.id, ...settingsData },
+        });
+      }
+    }
+
+    return loadBusinessSettings(current, tx);
+  });
+}
+
+/**
+ * Uploads one business image (logo / stamp / signature) for a business the
+ * caller owns.
+ *
+ * The full server-side contract is implemented here: session + ownership are
+ * proven, the archive rule is enforced, and the file's type and size are
+ * validated server-side (never trusting the browser). The only deferred piece
+ * is the actual object-storage write — `putBusinessImage` refuses with
+ * `FileStorageNotConfiguredError` until the S3-compatible adapter is wired
+ * (see `src/server/storage/storageService.ts`). The storage→`File` row→
+ * profile-link sequence below activates unchanged together with it; no
+ * `logoFileId`/`sellerStampFileId`/`sellerSignatureFileId` can ever be set
+ * from a profile payload instead.
+ */
+export async function uploadBusinessImage(
+  businessId: string,
+  category: BusinessImageCategory,
+  formData: FormData,
+): Promise<BusinessSettingsRecord> {
+  const owned = await requireBusinessOwnership(businessId);
+
+  if (owned.archivedAt) {
+    throw new ValidationError("Cannot upload files for an archived business");
+  }
+  if (!isBusinessImageCategory(category)) {
+    throw new ValidationError("Unsupported image category");
+  }
+
+  const candidate = formData.get("file");
+  if (!(candidate instanceof File)) {
+    throw new ValidationError("file: a file is required");
+  }
+
+  // Server-side validation of type and size — the client's checks are UX only.
+  validateImageUpload({ name: candidate.name, type: candidate.type, size: candidate.size });
+
+  const bytes = new Uint8Array(await candidate.arrayBuffer());
+
+  // DEFERRED INTEGRATION POINT: throws FileStorageNotConfiguredError until the
+  // storage adapter exists. Everything below is the future wiring, kept here
+  // so enabling storage later touches only the storage module.
+  const stored = await putBusinessImage({
+    category,
+    businessId: owned.id,
+    fileName: candidate.name,
+    mimeType: candidate.type,
+    bytes,
+  });
+
+  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    const file = await tx.file.create({
+      data: {
+        accountId: owned.accountId, // session-derived, never client-supplied
+        businessId: owned.id,
+        storageKey: stored.storageKey,
+        originalName: candidate.name,
+        mimeType: candidate.type,
+        size: candidate.size,
+        category,
+      },
+    });
+
+    const profileField = IMAGE_CATEGORY_PROFILE_FIELD[category];
+    await tx.businessProfile.update({
+      where: { businessId: owned.id },
+      data: { [profileField]: file.id },
+    });
+
+    const reloaded = await tx.business.findUnique({ where: { id: owned.id } });
+    return loadBusinessSettings(reloaded ?? owned, tx);
+  });
+}
