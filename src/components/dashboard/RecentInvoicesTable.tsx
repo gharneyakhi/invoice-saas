@@ -45,6 +45,9 @@ function displayRecentInvoiceNumber(inv: DashboardRecentInvoiceDTO): string {
 export const INVOICE_NUMBER_CELL_CLASS =
   "py-3.5 px-5 font-medium text-gray-900 font-sans text-[13px] whitespace-nowrap";
 
+/** Desktop customer cell: 13px medium, real name (truncated when very long). */
+export const CUSTOMER_CELL_CLASS = "py-3.5 px-4 font-medium text-gray-900 font-sans";
+
 /** Mobile invoice-number typography: 14px semi-bold, no wrapping. */
 export const INVOICE_NUMBER_MOBILE_CLASS =
   "font-semibold text-sm text-gray-900 font-sans whitespace-nowrap";
@@ -116,14 +119,15 @@ export function RecentInvoicesTable({
           <>
             {/* Desktop Table View */}
             <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-right text-xs">
+              <table className="w-full text-right text-[13px]">
                 <thead className="border-y border-gray-100 bg-gray-50/75 text-gray-500">
                   <tr>
                     <th scope="col" className="py-3 px-5 font-semibold">شماره فاکتور</th>
+                    <th scope="col" className="py-3 px-4 font-semibold">مشتری</th>
                     <th scope="col" className="py-3 px-4 font-semibold">نوع</th>
-                    <th scope="col" className="py-3 px-4 font-semibold">وضعیت</th>
                     <th scope="col" className="py-3 px-4 font-semibold">تاریخ صدور</th>
                     <th scope="col" className="py-3 px-4 font-semibold">سررسید</th>
+                    <th scope="col" className="py-3 px-4 font-semibold">وضعیت</th>
                     <th scope="col" className="py-3 px-4 font-semibold">مبلغ کل</th>
                     <th scope="col" className="py-3 px-4 font-semibold">مانده</th>
                     <th scope="col" className="py-3 px-5 text-left font-semibold">عملیات</th>
@@ -140,13 +144,16 @@ export function RecentInvoicesTable({
                         <td className={INVOICE_NUMBER_CELL_CLASS}>
                           {displayRecentInvoiceNumber(inv)}
                         </td>
+                        <td className={CUSTOMER_CELL_CLASS}>
+                          <span
+                            className="block max-w-[16rem] truncate"
+                            title={inv.customerName ?? undefined}
+                          >
+                            {inv.customerName ?? "—"}
+                          </span>
+                        </td>
                         <td className="py-3.5 px-4 text-gray-600">
                           {formatInvoiceType(inv.invoiceType)}
-                        </td>
-                        <td className="py-3.5 px-4">
-                          <Badge variant={statusMeta.variant} showDot>
-                            {statusMeta.label}
-                          </Badge>
                         </td>
                         <td className="py-3.5 px-4 text-gray-600 font-sans">
                           {formatPersianDateShort(inv.issueDate)}
@@ -154,10 +161,15 @@ export function RecentInvoicesTable({
                         <td className="py-3.5 px-4 text-gray-500 font-sans">
                           {inv.dueDate ? formatPersianDateShort(inv.dueDate) : "—"}
                         </td>
-                        <td className="py-3.5 px-4 font-semibold text-gray-900 font-sans">
+                        <td className="py-3.5 px-4">
+                          <Badge variant={statusMeta.variant} showDot>
+                            {statusMeta.label}
+                          </Badge>
+                        </td>
+                        <td className="py-3.5 px-4 font-semibold text-gray-900 font-sans whitespace-nowrap">
                           {formatCurrency(inv.total, currencyOf(inv))}
                         </td>
-                        <td className="py-3.5 px-4 text-gray-600 font-sans">
+                        <td className="py-3.5 px-4 font-medium text-gray-700 font-sans whitespace-nowrap">
                           {formatCurrency(inv.remainingAmount, currencyOf(inv))}
                         </td>
                         <td className="py-3.5 px-5 text-left">
@@ -197,6 +209,16 @@ export function RecentInvoicesTable({
                       <Badge variant={statusMeta.variant} showDot>
                         {statusMeta.label}
                       </Badge>
+                    </div>
+
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="text-gray-400 text-[11px] shrink-0">مشتری:</span>
+                      <span
+                        className="font-medium text-gray-900 min-w-0 truncate"
+                        title={inv.customerName ?? undefined}
+                      >
+                        {inv.customerName ?? "—"}
+                      </span>
                     </div>
 
                     <div className="grid grid-cols-2 gap-2 text-xs pt-1">

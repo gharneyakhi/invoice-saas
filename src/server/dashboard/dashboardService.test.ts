@@ -222,6 +222,7 @@ describe("getDashboardData", () => {
         invoiceNumber: "101",
         invoiceType: "FINAL",
         status: "PAID",
+        customer: { name: "شرکت آلفا" },
         total: new Decimal("100000.00"),
         paidAmount: new Decimal("100000.00"),
         remainingAmount: new Decimal("0.00"),
@@ -245,6 +246,7 @@ describe("getDashboardData", () => {
         invoiceNumber: true,
         invoiceType: true,
         status: true,
+        customer: { select: { name: true } },
         total: true,
         paidAmount: true,
         remainingAmount: true,
@@ -260,9 +262,52 @@ describe("getDashboardData", () => {
       id: "inv-1",
       invoiceNumber: "101",
       status: "PAID",
+      customerName: "شرکت آلفا",
       total: "100000.00",
       createdAt: "2026-03-05T00:00:00.000Z",
     });
+  });
+
+  it("carries the current customer name per recent invoice (null when the invoice has no customer)", async () => {
+    const { getDashboardData } = await import("./dashboardService");
+
+    prismaMock.invoice.findMany.mockResolvedValue([
+      {
+        id: "inv-1",
+        invoiceNumber: "101",
+        invoiceType: "FINAL",
+        status: "PAID",
+        customer: { name: "شرکت آلفا" },
+        total: new Decimal("1000.00"),
+        paidAmount: new Decimal("1000.00"),
+        remainingAmount: new Decimal("0.00"),
+        currency: "IRR",
+        issueDate: new Date("2026-03-05T00:00:00.000Z"),
+        dueDate: null,
+        finalizedAt: new Date("2026-03-05T01:00:00.000Z"),
+        createdAt: new Date("2026-03-05T00:00:00.000Z"),
+      },
+      {
+        id: "inv-2",
+        invoiceNumber: "102",
+        invoiceType: "FINAL",
+        status: "ISSUED",
+        customer: null,
+        total: new Decimal("2000.00"),
+        paidAmount: new Decimal("0.00"),
+        remainingAmount: new Decimal("2000.00"),
+        currency: "IRR",
+        issueDate: new Date("2026-03-06T00:00:00.000Z"),
+        dueDate: null,
+        finalizedAt: new Date("2026-03-06T01:00:00.000Z"),
+        createdAt: new Date("2026-03-06T00:00:00.000Z"),
+      },
+    ]);
+
+    const data = await getDashboardData();
+
+    expect(data.recentInvoices[0]?.customerName).toBe("شرکت آلفا");
+    expect(data.recentInvoices[1]?.customerName).toBeNull();
   });
 
   it("clamps the recent-invoices limit to a small bound", async () => {

@@ -5,6 +5,7 @@ import {
   RecentInvoicesTable,
   INVOICE_NUMBER_CELL_CLASS,
   INVOICE_NUMBER_MOBILE_CLASS,
+  CUSTOMER_CELL_CLASS,
 } from "./RecentInvoicesTable";
 import type { DashboardRecentInvoiceDTO } from "@/server/dashboard/dashboardService";
 
@@ -33,6 +34,7 @@ function draftInvoice(
     invoiceNumber: `DRAFT-${DRAFT_UUID}`,
     invoiceType: "FINAL",
     status: "DRAFT",
+    customerName: "شرکت آلفا",
     total: "109000.00",
     paidAmount: "0.00",
     remainingAmount: "109000.00",
@@ -53,6 +55,7 @@ function finalizedInvoice(
     invoiceNumber: "14052",
     invoiceType: "FINAL",
     status: "PENDING_PAYMENT",
+    customerName: "شرکت گاما",
     total: "2500000.00",
     paidAmount: "0.00",
     remainingAmount: "2500000.00",
@@ -127,5 +130,85 @@ describe("RecentInvoicesTable — invoice identifier display", () => {
     expect(INVOICE_NUMBER_MOBILE_CLASS).toContain("text-sm");
     expect(INVOICE_NUMBER_MOBILE_CLASS).toContain("font-semibold");
     expect(INVOICE_NUMBER_MOBILE_CLASS).toContain("whitespace-nowrap");
+  });
+});
+
+describe("RecentInvoicesTable — customer column & readability", () => {
+  function desktopTable(html: string): string {
+    const table = html.match(/<table[\s\S]*?<\/table>/);
+    if (!table) throw new Error("desktop table not rendered");
+    return table[0];
+  }
+
+  it("renders the real customer name (from DTO field customerName) on desktop and mobile", () => {
+    const html = render([draftInvoice()]);
+
+    // Real names come straight from the dashboard DTO — no hard-coding.
+    // Visible text + title tooltip in BOTH the desktop table and the mobile card.
+    expect(html.match(/شرکت آلفا/g)?.length).toBe(4);
+    expect(desktopTable(html)).toContain("شرکت آلفا");
+  });
+
+  it("renders «—» for a row without a customer", () => {
+    const table = desktopTable(render([finalizedInvoice({ customerName: null })]));
+    const cell = table.match(
+      new RegExp(`<td class="${CUSTOMER_CELL_CLASS}">([\\s\\S]*?)</td>`),
+    )?.[1];
+
+    expect(cell).toContain("—");
+    expect(cell).not.toContain("title=");
+  });
+
+  it("keeps the UX column order: شماره، مشتری، نوع، تاریخ صدور، سررسید، وضعیت، مبلغ کل، مانده، عملیات", () => {
+    const html = desktopTable(render([draftInvoice()]));
+    const headers = Array.from(html.matchAll(/<th[\s>][^>]*>(.*?)<\/th>/g), (m) => m[1]);
+
+    expect(headers).toEqual([
+      "شماره فاکتور",
+      "مشتری",
+      "نوع",
+      "تاریخ صدور",
+      "سررسید",
+      "وضعیت",
+      "مبلغ کل",
+      "مانده",
+      "عملیات",
+    ]);
+  });
+
+  it("places the customer cell between the number and type cells in each row", () => {
+    const table = desktopTable(render([draftInvoice({ customerName: "شرکت آلفا" })]));
+    const row =
+      Array.from(table.matchAll(/<tr[\s\S]*?<\/tr>/g), (m) => m[0]).find((r) =>
+        r.includes("پیش‌نویس"),
+      ) ?? "";
+
+    const numberIdx = row.indexOf("پیش‌نویس");
+    const customerIdx = row.indexOf("شرکت آلفا");
+    const typeIdx = row.indexOf("فاکتور رسمی");
+    expect(numberIdx).toBeGreaterThanOrEqual(0);
+    expect(customerIdx).toBeGreaterThan(numberIdx);
+    expect(typeIdx).toBeGreaterThan(customerIdx);
+  });
+
+  it("keeps table data readable (~13px) with the customer medium and money semibold", () => {
+    const html = render([finalizedInvoice()]);
+
+    expect(html).toMatch(/<table class="w-full text-right text-\[13px\]"/);
+    expect(CUSTOMER_CELL_CLASS).toContain("font-medium");
+    expect(CUSTOMER_CELL_CLASS).toContain("text-gray-900");
+    expect(html).toContain("font-semibold text-gray-900 font-sans whitespace-nowrap");
+  });
+
+  it("does not regress the «پیش‌نویس» draft label or the row actions when a customer column is present", () => {
+    const html = render([draftInvoice()]);
+
+    expect(html).toContain("پیش‌نویس");
+    expect(html).not.toContain(DRAFT_UUID);
+    expect(html).not.toMatch(/DRAFT[:-][0-9a-f-]{8,}/i);
+    expect(html).toContain("مشتری");
+    expect(html).toContain("جزئیات");
+    expect(html).toContain("مشاهده فاکتور");
+    expect(html).toMatch(/href="\/dashboard\/invoices"/);
   });
 });
