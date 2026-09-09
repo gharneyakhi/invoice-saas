@@ -8,6 +8,7 @@ import {
   formatInvoiceType,
   formatPersianDate,
   formatPersianNumber,
+  formatPersianPercent,
   toPersianDigits,
 } from "@/lib/formatters";
 import type {
@@ -54,14 +55,8 @@ function moneyDigits(value: string | null | undefined): string {
   return formatPersianNumber(value);
 }
 
-/** Percent decimal string ("9.00") → Persian percent ("۹٪"). */
-function percentLabel(value: string | null | undefined): string {
-  const normalized = (value ?? "").trim();
-  if (normalized === "") return "۰٪";
-  const trimmed = normalized.replace(/0+$/, "").replace(/\.$/, "");
-  const digits = trimmed === "" ? "0" : trimmed;
-  return `${toPersianDigits(digits)}٪`;
-}
+/** Percent decimal string ("9.00") → Persian percent ("۹٪"). Shared with PDF export. */
+const percentLabel = formatPersianPercent;
 
 function currencyUnit(currency: string): string {
   return invoiceCurrencyLabel(currency);

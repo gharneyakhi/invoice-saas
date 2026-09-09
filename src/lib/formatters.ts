@@ -42,6 +42,22 @@ export function formatCurrency(
   return `${toPersianDigits(formatted)} ${unit}`;
 }
 
+/**
+ * Formats a stored percent decimal string ("9.00") as a Persian percent ("۹٪").
+ *
+ * Shared by the HTML preview document and the PDF export so both render the
+ * identical label from the identical stored value. Pure formatting: trims
+ * insignificant zeros, converts digits, appends the percent sign. Empty input
+ * renders as "۰٪".
+ */
+export function formatPersianPercent(value: string | null | undefined): string {
+  const normalized = (value ?? "").trim();
+  if (normalized === "") return "۰٪";
+  const trimmed = normalized.replace(/0+$/, "").replace(/\.$/, "");
+  const digits = trimmed === "" ? "0" : trimmed;
+  return `${toPersianDigits(digits)}٪`;
+}
+
 /** Persian label for a stored InvoicePayment.method value. */
 export function formatPaymentMethod(method: string | null | undefined): string {
   switch (method) {
