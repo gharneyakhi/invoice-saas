@@ -69,6 +69,9 @@ const FALLBACK_MESSAGES: Record<ActionErrorCode, string> = {
   ENTITLEMENT_DATA_ERROR: "اطلاعات اشتراک برای نهایی کردن در دسترس نیست. کمی بعد تلاش کنید.",
   FILE_STORAGE_NOT_CONFIGURED: "سرویس ذخیره‌سازی فایل در دسترس نیست.",
   FILE_STORAGE_UPLOAD_FAILED: "ذخیره‌سازی فایل ناموفق بود؛ دوباره تلاش کنید.",
+  GMAIL_NOT_CONNECTED: "حساب جیمیل متصل نیست. ابتدا جیمیل را متصل کنید.",
+  GMAIL_SEND_FAILED: "ارسال از طریق جیمیل ناموفق بود. لطفاً دوباره تلاش کنید.",
+  GMAIL_NOT_CONFIGURED: "سرویس ارسال جیمیل در دسترس نیست.",
   INTERNAL_ERROR: "خطای غیرمنتظره‌ای رخ داد. دوباره تلاش کنید و در صورت تکرار بعداً مراجعه کنید.",
 };
 

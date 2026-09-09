@@ -28,3 +28,19 @@ Why Vazirmatn, and why these exact files:
   in `persianText.test.ts` will fail loudly when that assumption breaks.
 - Static (non-variable) TTFs: pdf-lib/fontkit subset-embedding is only
   exercised against static fonts in this repo.
+
+## Raster (PNG/JPG) pipeline font files (recovered)
+
+The SVG→PNG/JPG renderer (`../imageService.ts`) embeds its own copy via
+`@font-face`, loaded through `../fontLoader.ts` (recovered from the Export V1
+branch `dd2d54c`, kept verbatim so image output stays byte-identical):
+
+- `Vazirmatn.ttf` — single Regular weight (source: `google/fonts`,
+  `ofl/vazirmatn`, `Vazirmatn[wght].ttf` default instance); the input for the
+  generated embed below.
+- `vazirmatnFont.ts` — GENERATED base64 module of that TTF (see
+  `scripts/regen-font-embed.mjs`); embedded as a module rather than read from
+  disk so generation behaves identically on serverless. Excluded from ESLint
+  via `.eslintignore` (generated).
+
+`OFL.txt` (identical in both sources) covers all files in this directory.
