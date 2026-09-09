@@ -9,7 +9,6 @@ import {
   formatPersianDateShort,
   formatInvoiceStatus,
   formatInvoiceType,
-  toPersianDigits,
 } from "@/lib/formatters";
 import {
   InvoicesIcon,
@@ -18,6 +17,7 @@ import {
   ChevronLeftIcon,
   FileTextIcon,
 } from "@/components/icons";
+import { formatInvoiceIdentifierDisplay } from "@/lib/invoice-identifier-display";
 import type { DashboardRecentInvoiceDTO } from "@/server/dashboard/dashboardService";
 
 export interface RecentInvoicesTableProps {
@@ -29,18 +29,12 @@ export interface RecentInvoicesTableProps {
 }
 
 /**
- * Presentation-only identifier for a dashboard invoice row.
- *
- * Drafts store an internal `DRAFT-<uuid>` placeholder — never show it in the
- * UI. Drafts render a clean «پیش‌نویس» label; finalized invoices keep their
- * official number exactly (only Persian digits are applied for display).
- * The underlying `invoiceNumber` value is never changed here.
+ * Identifier shown in the «شماره فاکتور» column. Drafts render the clean
+ * «پیش‌نویس» label (never the internal `DRAFT-<uuid>` placeholder); finalized
+ * invoices keep their official number. See `@/lib/invoice-identifier-display`.
  */
-export function displayRecentInvoiceNumber(inv: DashboardRecentInvoiceDTO): string {
-  if (inv.status === "DRAFT" || /^DRAFT[:-]/.test(inv.invoiceNumber)) {
-    return "پیش‌نویس";
-  }
-  return inv.invoiceNumber ? toPersianDigits(inv.invoiceNumber) : "—";
+function displayRecentInvoiceNumber(inv: DashboardRecentInvoiceDTO): string {
+  return formatInvoiceIdentifierDisplay(inv.status, inv.invoiceNumber);
 }
 
 /**

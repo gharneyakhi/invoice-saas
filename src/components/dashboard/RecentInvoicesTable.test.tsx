@@ -11,9 +11,14 @@ import type { DashboardRecentInvoiceDTO } from "@/server/dashboard/dashboardServ
 /**
  * Dashboard recent-invoices identifier display contract.
  *
- * Drafts must never leak their internal `DRAFT-<uuid>` placeholder; the
- * dashboard shows a clean «پیش‌نویس» label instead, while finalized invoices
- * keep their official number (only converted to Persian digits for display).
+ * Fixtures mirror the exact real DTO shape produced by the data flow:
+ * `dashboardService.toRecentInvoiceDTO` maps `status` and `invoiceNumber`
+ * 1:1 from the `invoices` table, so a draft row is
+ * `{ status: "DRAFT", invoiceNumber: "DRAFT-<uuid>", finalizedAt: null, ... }`.
+ * The status pill renders from the SAME `status` field; the number cell must
+ * therefore show «پیش‌نویس» for every row whose pill says «پیش‌نویس», never
+ * the internal `DRAFT-<uuid>` placeholder. Finalized invoices keep their
+ * official number (only converted to Persian digits for display).
  * This is presentation-only — the underlying `invoiceNumber` value is not
  * touched and the row links/actions must keep working.
  */
@@ -72,6 +77,24 @@ describe("RecentInvoicesTable — invoice identifier display", () => {
     expect(html).not.toContain(DRAFT_UUID);
     expect(html).not.toContain(`DRAFT-${DRAFT_UUID}`);
     expect(html).not.toMatch(/DRAFT[:-][0-9a-f-]{8,}/i);
+  });
+
+  it("derives the number cell and the «پیش‌نویس» status pill from the same status field (real DTO shape)", () => {
+    // Exact dashboardService output for a draft: status DRAFT, finalizedAt null,
+    // currency null, invoiceNumber carrying the internal placeholder.
+    const html = render([
+      draftInvoice({
+        status: "DRAFT",
+        finalizedAt: null,
+        currency: null,
+        invoiceNumber: `DRAFT-${DRAFT_UUID}`,
+      }),
+    ]);
+
+    // The pill (وضعیت) and the number cell must agree on «پیش‌نویس».
+    expect(html).toContain("پیش‌نویس");
+    expect(html).not.toContain(`DRAFT-${DRAFT_UUID}`);
+    expect(html).not.toContain(DRAFT_UUID);
   });
 
   it("renders a finalized invoice's official number in Persian digits", () => {
