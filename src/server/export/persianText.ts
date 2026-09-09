@@ -1,108 +1,49 @@
 /**
- * Persian / Arabic text shaping for server-side PDF generation.
+ * Persian / Arabic bidirectional text pipeline for server-side PDF generation.
  *
- * `pdf-lib` maps code points to glyphs one-to-one and performs no complex
- * text layout: without help, Persian text would render disconnected and in
- * logical (not visual) order. This module converts a logical-order string
- * into the visual-order string `pdf-lib` must draw, using the well-known
- * presentation-forms technique:
+ * `pdf-lib` delegates custom-font text layout to `fontkit`, whose `layout()`
+ * has NO run-based bidi: it detects ONE script per `drawText` call (the first
+ * non-Common/Inherited character) and, when that script is right-to-left
+ * (Arabic, Hebrew, ...), FULLY REVERSES the glyph run after OpenType shaping
+ * (see `OTLayoutEngine.position` in `@pdf-lib/fontkit`: `if
+ * (glyphRun.direction === 'rtl') { glyphRun.glyphs.reverse(); ... }`).
+ * Consequences, all verified against the bundled fontkit:
  *
- *   1. Arabic letters are replaced by their contextual presentation forms
- *      (isolated / initial / medial / final) from Unicode blocks U+FB50–FBFF
- *      (Persian extensions: پ چ ژ ک گ ی) and U+FE70–FEFF, including the
- *      lam-alef ligatures (لا). Zero-width joiners control joining and are
- *      then dropped; combining marks stay attached to their base letter.
- *   2. The line is reordered for display: in a right-to-left paragraph the
- *      sequence of directional runs is reversed while Latin / number runs
- *      keep their internal order, so "فاکتور ۱۲۳" and "INV-101" both read
- *      correctly. Brackets are mirrored.
+ *   - pure Latin/digit strings pass through untouched;
+ *   - pure Arabic-script strings come back in correct visual order AND with
+ *     real GSUB shaping (contextual forms, lam-alef ligatures, ZWNJ breaks,
+ *     mark positioning) — the font's own shaper does this correctly;
+ *   - MIXED strings (Persian + Latin/digits) come back SCRAMBLED: Latin and
+ *     digit runs are reversed along with everything else.
  *
- * This is a deliberately small, invoice-scoped subset of the Unicode bidi
- * algorithm — enough for business names, addresses, item titles, money and
- * identifiers — not a general text-layout engine. Pure and dependency-free.
+ * So a single pre-reordered "visual string" can NEVER be drawn correctly —
+ * this module therefore converts each logical line into an ordered list of
+ * single-direction FRAGMENTS. The PDF renderer draws every fragment with its
+ * own `drawText` call, in order, advancing x by the measured fragment width.
+ * Each fragment carries the EXACT string fontkit must receive:
+ *
+ *   - `rtl`:   logical-order text (Arabic letters + neutrals, NO Latin and NO
+ *              digits). fontkit reverses it into visual order and GSUB-shapes
+ *              it. Brackets are pre-mirrored here because fontkit reverses
+ *              but never mirrors.
+ *   - `ltr`:   visual-order text with no Arabic-script characters (Latin,
+ *              ASCII digits, punctuation). fontkit renders it as-is.
+ *   - `ltr-rev`: visual-order text made ONLY of Arabic-script non-letters
+ *              (Persian/Arabic-Indic digits, ٪ ، ...) — which WOULD trigger
+ *              fontkit's RTL detection — passed PRE-REVERSED so fontkit's own
+ *              reversal restores the intended order. Widths are unaffected
+ *              (reversal preserves advances).
+ *
+ * The run segmentation below is an invoice-scoped subset of the Unicode bidi
+ * algorithm: weak-type resolution (percent/decimal/thousands separators join
+ * their number), N0-style bracket pairing (`(snapshot)` stays an LTR unit;
+ * `(۱۰٪)` sits on the RTL side so `۲۰,۰۰۰ (۱۰٪)` shows `(۱۰٪) ۲۰,۰۰۰`),
+ * neutral resolution by flanking runs, and mirroring. Pure and
+ * dependency-free; fontkit itself is only touched by the renderer.
  */
 
-// ---------------------------------------------------------------------------
-// Joining table: code point -> contextual presentation forms.
-// ---------------------------------------------------------------------------
-
-type JoiningType = "D" | "R" | "U";
-
-interface JoiningEntry {
-  type: JoiningType;
-  /** [isolated, initial, medial, final] — null when the form cannot occur. */
-  forms: [number | null, number | null, number | null, number | null];
-}
-
-const JOINING_TABLE = new Map<number, JoiningEntry>([
-  [0x0621, { type: "U", forms: [0xfe80, null, null, null] }], // ء HAMZA
-  [0x0622, { type: "R", forms: [0xfe81, null, null, 0xfe82] }], // آ
-  [0x0623, { type: "R", forms: [0xfe83, null, null, 0xfe84] }], // أ
-  [0x0624, { type: "R", forms: [0xfe85, null, null, 0xfe86] }], // ؤ
-  [0x0625, { type: "R", forms: [0xfe87, null, null, 0xfe88] }], // إ
-  [0x0626, { type: "D", forms: [0xfe89, 0xfe8b, 0xfe8c, 0xfe8a] }], // ئ
-  [0x0627, { type: "R", forms: [0xfe8d, null, null, 0xfe8e] }], // ا
-  [0x0628, { type: "D", forms: [0xfe8f, 0xfe91, 0xfe92, 0xfe90] }], // ب
-  [0x0629, { type: "R", forms: [0xfe93, null, null, 0xfe94] }], // ة
-  [0x062a, { type: "D", forms: [0xfe95, 0xfe97, 0xfe98, 0xfe96] }], // ت
-  [0x062b, { type: "D", forms: [0xfe99, 0xfe9b, 0xfe9c, 0xfe9a] }], // ث
-  [0x062c, { type: "D", forms: [0xfe9d, 0xfe9f, 0xfea0, 0xfe9e] }], // ج
-  [0x062d, { type: "D", forms: [0xfea1, 0xfea3, 0xfea4, 0xfea2] }], // ح
-  [0x062e, { type: "D", forms: [0xfea5, 0xfea7, 0xfea8, 0xfea6] }], // خ
-  [0x062f, { type: "R", forms: [0xfea9, null, null, 0xfeaa] }], // د
-  [0x0630, { type: "R", forms: [0xfeab, null, null, 0xfeac] }], // ذ
-  [0x0631, { type: "R", forms: [0xfead, null, null, 0xfeae] }], // ر
-  [0x0632, { type: "R", forms: [0xfeaf, null, null, 0xfeb0] }], // ز
-  [0x0633, { type: "D", forms: [0xfeb1, 0xfeb3, 0xfeb4, 0xfeb2] }], // س
-  [0x0634, { type: "D", forms: [0xfeb5, 0xfeb7, 0xfeb8, 0xfeb6] }], // ش
-  [0x0635, { type: "D", forms: [0xfeb9, 0xfebb, 0xfebc, 0xfeba] }], // ص
-  [0x0636, { type: "D", forms: [0xfebd, 0xfebf, 0xfec0, 0xfebe] }], // ض
-  [0x0637, { type: "D", forms: [0xfec1, 0xfec3, 0xfec4, 0xfec2] }], // ط
-  [0x0638, { type: "D", forms: [0xfec5, 0xfec7, 0xfec8, 0xfec6] }], // ظ
-  [0x0639, { type: "D", forms: [0xfec9, 0xfecb, 0xfecc, 0xfeca] }], // ع
-  [0x063a, { type: "D", forms: [0xfecd, 0xfecf, 0xfed0, 0xfece] }], // غ
-  [0x0641, { type: "D", forms: [0xfed1, 0xfed3, 0xfed4, 0xfed2] }], // ف
-  [0x0642, { type: "D", forms: [0xfed5, 0xfed7, 0xfed8, 0xfed6] }], // ق
-  [0x0643, { type: "D", forms: [0xfed9, 0xfedb, 0xfedc, 0xfeda] }], // ك
-  [0x0644, { type: "D", forms: [0xfedd, 0xfedf, 0xfee0, 0xfede] }], // ل
-  [0x0645, { type: "D", forms: [0xfee1, 0xfee3, 0xfee4, 0xfee2] }], // م
-  [0x0646, { type: "D", forms: [0xfee5, 0xfee7, 0xfee8, 0xfee6] }], // ن
-  [0x0647, { type: "D", forms: [0xfee9, 0xfeeb, 0xfeec, 0xfeea] }], // ه
-  [0x0648, { type: "R", forms: [0xfeed, null, null, 0xfeee] }], // و
-  [0x0649, { type: "R", forms: [0xfeef, null, null, 0xfef0] }], // ى
-  [0x064a, { type: "D", forms: [0xfef1, 0xfef3, 0xfef4, 0xfef2] }], // ي
-  [0x0671, { type: "R", forms: [0xfb50, null, null, 0xfb51] }], // ٱ
-  [0x067e, { type: "D", forms: [0xfb56, 0xfb58, 0xfb59, 0xfb57] }], // پ
-  [0x0686, { type: "D", forms: [0xfb7a, 0xfb7c, 0xfb7d, 0xfb7b] }], // چ
-  [0x0698, { type: "R", forms: [0xfb8a, null, null, 0xfb8b] }], // ژ
-  [0x06a9, { type: "D", forms: [0xfb8e, 0xfb90, 0xfb91, 0xfb8f] }], // ک
-  [0x06af, { type: "D", forms: [0xfb92, 0xfb94, 0xfb95, 0xfb93] }], // گ
-  [0x06cc, { type: "D", forms: [0xfbfc, 0xfbfe, 0xfbff, 0xfbfd] }], // ی
-]);
-
-/** Lam + alef ligatures: alef code point -> [isolated, final] ligature. */
-const LAM_ALEF_LIGATURES = new Map<number, [number, number]>([
-  [0x0627, [0xfefb, 0xfefc]], // لا
-  [0x0623, [0xfef7, 0xfef8]], // لأ
-  [0x0625, [0xfef9, 0xfefa]], // لإ
-  [0x0622, [0xfef5, 0xfef6]], // لآ
-]);
-
-const LAM = 0x0644;
 const ZWNJ = 0x200c;
 const ZWJ = 0x200d;
-
-// Neutral chars that mirror in RTL display (logical -> visual).
-const MIRROR_MAP = new Map<number, number>([
-  [0x0028, 0x0029], // ( -> )
-  [0x0029, 0x0028], // ) -> (
-  [0x005b, 0x005d], // [ -> ]
-  [0x005d, 0x005b], // ] -> [
-  [0x007b, 0x007d], // { -> }
-  [0x007d, 0x007b], // } -> {
-  [0x003c, 0x003e], // < -> >
-  [0x003e, 0x003c], // > -> <
-]);
 
 // ---------------------------------------------------------------------------
 // Character classification
@@ -125,38 +66,243 @@ function isDigit(cp: number): boolean {
 /** Combining marks: transparent to joining, rendered with their base char. */
 function isCombiningMark(cp: number): boolean {
   return (
+    (cp >= 0x0610 && cp <= 0x061a) ||
     (cp >= 0x064b && cp <= 0x065f) ||
     cp === 0x0670 ||
     (cp >= 0x06d6 && cp <= 0x06ed)
   );
 }
 
-function classify(cp: number): CharClass {
-  if (cp === ZWNJ || cp === ZWJ) return "FORMAT";
-  if (isCombiningMark(cp)) return "MARK";
-  if (JOINING_TABLE.has(cp)) return "RTL";
-  // Other Arabic-block letters without presentation forms (e.g. ګ, tah with
-  // three dots) still flow right-to-left; they pass through unshaped.
-  if (
-    (cp >= 0x0600 && cp <= 0x06ff) ||
+/**
+ * Arabic-script LETTERS (as opposed to digits/punctuation): core Arabic
+ * (incl. hamza forms and tatweel U+0640), Persian extensions (پ چ ژ ک گ ی),
+ * Arabic Supplement / Extended-A/B, and the presentation-forms blocks
+ * (accepted pass-through on input).
+ */
+function isArabicLetter(cp: number): boolean {
+  return (
+    (cp >= 0x0621 && cp <= 0x064a) ||
+    (cp >= 0x066e && cp <= 0x06d3) ||
+    (cp >= 0x06fa && cp <= 0x06ff) ||
     (cp >= 0x0750 && cp <= 0x077f) ||
+    (cp >= 0x0870 && cp <= 0x089f) ||
+    (cp >= 0x08a0 && cp <= 0x08ff) ||
     (cp >= 0xfb50 && cp <= 0xfdff) ||
     (cp >= 0xfe70 && cp <= 0xfefe)
-  ) {
-    return isDigit(cp) ? "NUMBER" : "RTL";
-  }
+  );
+}
+
+/**
+ * Arabic-block PUNCTUATION: neutral for ordering purposes (NOT strong RTL —
+ * classifying these as RTL is what used to split number runs apart and
+ * scramble every percent/discount cell). Weak-type resolution below re-glues
+ * the numeric ones (٪ ٫ ٬ ،) to adjacent digits.
+ */
+const ARABIC_PUNCTUATION = new Set<number>([
+  0x060c, // ، ARABIC COMMA
+  0x060d, // ؍ ARABIC DATE SEPARATOR
+  0x060e, // ؎ ARABIC POETIC VERSE SIGN
+  0x060f, // ؽ ARABIC SIGN MISRA
+  0x061b, // ؛ ARABIC SEMICOLON
+  0x061f, // ؟ ARABIC QUESTION MARK
+  0x066a, // ٪ ARABIC PERCENT SIGN
+  0x066b, // ٫ ARABIC DECIMAL SEPARATOR
+  0x066c, // ٬ ARABIC THOUSANDS SEPARATOR
+  0x066d, // ٭ ARABIC FIVE POINTED STAR
+  0x06d4, // ۔ ARABIC FULL STOP
+]);
+
+const FORMAT_CHARS = new Set<number>([
+  ZWNJ, // ZERO WIDTH NON-JOINER (joining break — the shaper needs it)
+  ZWJ, // ZERO WIDTH JOINER
+  0x061c, // ARABIC LETTER MARK
+]);
+
+function classify(cp: number): CharClass {
+  if (FORMAT_CHARS.has(cp)) return "FORMAT";
+  if (isCombiningMark(cp)) return "MARK";
   if (isDigit(cp)) return "NUMBER";
+  if (ARABIC_PUNCTUATION.has(cp)) return "NEUTRAL";
   if (isLatinLetter(cp)) return "LATIN";
+  if (isArabicLetter(cp)) return "RTL";
   return "NEUTRAL";
 }
 
-/** Separators allowed *inside* a number run when surrounded by digits. */
+/**
+ * True when the code point's Unicode script is one fontkit treats as
+ * right-to-left (in practice: Script=Arabic). fontkit scans for the first
+ * non-Common/Inherited/Unknown char and reverses the whole run when it is
+ * Arabic-script — this predicate replicates that trigger so fragments can
+ * compensate exactly.
+ */
+function firesFontkitRtl(cp: number): boolean {
+  return (
+    (cp >= 0x0600 && cp <= 0x06ff) ||
+    (cp >= 0x0750 && cp <= 0x077f) ||
+    (cp >= 0x0870 && cp <= 0x089f) ||
+    (cp >= 0x08a0 && cp <= 0x08ff) ||
+    (cp >= 0xfb50 && cp <= 0xfdff) ||
+    (cp >= 0xfe70 && cp <= 0xfeff)
+  );
+}
+
+// Neutral chars that mirror in RTL display (logical -> visual).
+const MIRROR_MAP = new Map<number, number>([
+  [0x0028, 0x0029], // ( -> )
+  [0x0029, 0x0028], // ) -> (
+  [0x005b, 0x005d], // [ -> ]
+  [0x005d, 0x005b], // ] -> [
+  [0x007b, 0x007d], // { -> }
+  [0x007d, 0x007b], // } -> {
+  [0x003c, 0x003e], // < -> >
+  [0x003e, 0x003c], // > -> <
+]);
+
+function mirrorChar(cp: number): number {
+  return MIRROR_MAP.get(cp) ?? cp;
+}
+
+/** Returns true when the text contains at least one Arabic-script letter. */
+export function containsRtl(text: string): boolean {
+  for (const char of text) {
+    const cp = char.codePointAt(0) ?? 0;
+    if (classify(cp) === "RTL") return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Weak-type resolution (UBA W4/W5 flavour, invoice subset)
+// ---------------------------------------------------------------------------
+
+/** European-terminator style: joins a preceding number (`۹٪`, `10%`). */
+const ET_CHARS = new Set<number>([
+  0x0025, // % PERCENT SIGN
+  0x066a, // ٪ ARABIC PERCENT SIGN
+  0x2030, // ‰ PER MILLE SIGN
+]);
+
+/** Arabic separators that join a number only when BETWEEN two digits. */
+const CS_ARABIC = new Set<number>([
+  0x060c, // ،
+  0x066b, // ٫
+  0x066c, // ٬
+]);
+
+/**
+ * Single left-to-right pass: an ET char whose resolved left neighbour is a
+ * number becomes a number (backward chaining, so `۱۰٪٪` stays one run);
+ * an Arabic CS char flanked by numbers on both sides becomes a number.
+ * Everything else keeps its raw class.
+ */
+function resolveWeakTypes(codePoints: number[], raw: CharClass[]): CharClass[] {
+  const out = [...raw];
+  for (let i = 0; i < codePoints.length; i += 1) {
+    const cp = codePoints[i] as number;
+    if (ET_CHARS.has(cp) && i > 0 && out[i - 1] === "NUMBER") {
+      out[i] = "NUMBER";
+    } else if (
+      CS_ARABIC.has(cp) &&
+      i > 0 &&
+      i + 1 < codePoints.length &&
+      out[i - 1] === "NUMBER" &&
+      raw[i + 1] === "NUMBER"
+    ) {
+      out[i] = "NUMBER";
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Bracket pairing (UBA N0 flavour, non-nested)
+// ---------------------------------------------------------------------------
+
+const BRACKET_PAIRS: ReadonlyArray<readonly [number, number]> = [
+  [0x0028, 0x0029], // ( )
+  [0x005b, 0x005d], // [ ]
+  [0x007b, 0x007d], // { }
+  [0x003c, 0x003e], // < >
+];
+
+/**
+ * Matches opening brackets with their next same-type closing bracket
+ * (first-match, no nesting in invoice scope) and classifies each pair by its
+ * enclosed content, UBA-N0 style:
+ *
+ *   - enclosed Latin (no RTL): an LTR pair (`(snapshot)`, `[INV-1]`) — the
+ *     whole span is one LTR run, drawn as-is;
+ *   - enclosed numbers/neutrals only (or empty): embedding-side brackets
+ *     (`(۱۰٪)`, `(۱۲۳)`) — in an RTL paragraph these sit on the RTL side, so
+ *     they are emitted as RTL-kind runs (reversing block order while the
+ *     number inside stays intact: `۲۰,۰۰۰ (۱۰٪)` shows `(۱۰٪) ۲۰,۰۰۰`);
+ *   - enclosed RTL: plain neutral brackets that merge into / mirror with the
+ *     surrounding RTL side (`(تومان)`).
+ */
+interface BracketPairs {
+  /** openIndex -> closeIndex for LTR pairs (drawn as one LTR run). */
+  ltrPairs: Map<number, number>;
+  /** Indices of embedding-side (RTL-kind) brackets. */
+  rtlSideBrackets: Set<number>;
+}
+
+function findBracketPairs(codePoints: number[], classes: CharClass[]): BracketPairs {
+  const closeFor = new Map<number, number>(BRACKET_PAIRS.map(([o, c]) => [o, c]));
+  const ltrPairs = new Map<number, number>();
+  const rtlSideBrackets = new Set<number>();
+  for (let i = 0; i < codePoints.length; i += 1) {
+    const close = closeFor.get(codePoints[i] as number);
+    if (close === undefined) continue;
+    for (let j = i + 1; j < codePoints.length; j += 1) {
+      if (codePoints[j] !== close) continue;
+      let hasRtl = false;
+      let hasLatin = false;
+      for (let k = i + 1; k < j; k += 1) {
+        if (classes[k] === "RTL") hasRtl = true;
+        if (classes[k] === "LATIN") hasLatin = true;
+      }
+      if (!hasRtl && hasLatin) {
+        ltrPairs.set(i, j);
+      } else if (!hasRtl) {
+        rtlSideBrackets.add(i);
+        rtlSideBrackets.add(j);
+      }
+      break; // first-match only (no nesting in invoice scope)
+    }
+  }
+  return { ltrPairs, rtlSideBrackets };
+}
+
+// ---------------------------------------------------------------------------
+// Segmentation into directional runs
+// ---------------------------------------------------------------------------
+
+interface Run {
+  kind: "RTL" | "LTR" | "NEUTRAL";
+  /** Logical-order code points. */
+  codePoints: number[];
+}
+
+function toCodePoints(text: string): number[] {
+  const out: number[] = [];
+  for (const char of text) out.push(char.codePointAt(0) ?? 0);
+  return out;
+}
+
+/** Chunked `String.fromCodePoint` (spread would overflow the stack on huge input). */
+function fromCodePoints(codePoints: number[]): string {
+  let out = "";
+  for (let i = 0; i < codePoints.length; i += 4096) {
+    out += String.fromCodePoint(...codePoints.slice(i, i + 4096));
+  }
+  return out;
+}
+
+/** ASCII separators allowed *inside* a number run when surrounded by digits. */
 function isIntraNumberSeparator(cp: number): boolean {
   return (
     cp === 0x002e || // .
     cp === 0x002c || // ,
-    cp === 0x066b || // ٫ Arabic decimal separator
-    cp === 0x066c || // ٬ Arabic thousands separator
     cp === 0x2044 || // ⁄ fraction slash
     cp === 0x002f || // /
     cp === 0x003a // :
@@ -174,38 +320,17 @@ function isTokenGlue(cp: number): boolean {
   );
 }
 
-/** Returns true when the text contains at least one right-to-left letter. */
-export function containsRtl(text: string): boolean {
-  for (const char of text) {
-    const cp = char.codePointAt(0) ?? 0;
-    if (classify(cp) === "RTL") return true;
-  }
-  return false;
-}
-
-// ---------------------------------------------------------------------------
-// Segmentation into directional runs
-// ---------------------------------------------------------------------------
-
-interface Run {
-  kind: "RTL" | "LTR" | "NEUTRAL";
-  /** Logical-order code points (marks still inline; FORMAT chars kept). */
-  codePoints: number[];
-}
-
-function toCodePoints(text: string): number[] {
-  const out: number[] = [];
-  for (const char of text) out.push(char.codePointAt(0) ?? 0);
-  return out;
-}
-
 /**
  * Splits logical text into directional runs and resolves neutrals:
  * a neutral run flanked by LTR content on both sides (mail@example.com,
- * card numbers with spaces) joins the LTR side; a neutral run flanked by
- * RTL joins the RTL side; anything else stays a standalone neutral run.
+ * card numbers with spaces, `a)b`) joins the LTR side unmirrored (N1);
+ * a neutral run flanked by RTL joins the RTL side; boundary neutrals join
+ * their neighbour EXCEPT mirrorable brackets, which stay standalone so they
+ * are mirrored. Anything else stays a standalone neutral run.
  */
-function segmentRuns(codePoints: number[]): Run[] {
+function segmentRuns(codePoints: number[], classes: CharClass[]): Run[] {
+  const { ltrPairs, rtlSideBrackets } = findBracketPairs(codePoints, classes);
+
   // Pass 1: raw runs by class, with number-glue and token-glue handling.
   const raw: Run[] = [];
   let i = 0;
@@ -219,35 +344,50 @@ function segmentRuns(codePoints: number[]): Run[] {
   };
 
   while (i < codePoints.length) {
-    const cp = codePoints[i] as number;
-    const cls = classify(cp);
+    const pairEnd = ltrPairs.get(i);
+    if (pairEnd !== undefined) {
+      for (let k = i; k <= pairEnd; k += 1) push("LTR", codePoints[k] as number);
+      i = pairEnd + 1;
+      continue;
+    }
+    if (rtlSideBrackets.has(i)) {
+      // Embedding-side bracket (N0: pair encloses numbers/neutrals only):
+      // an RTL-kind run so block order reverses around it.
+      push("RTL", codePoints[i] as number);
+      i += 1;
+      continue;
+    }
 
-    if (cls === "RTL" || cls === "MARK" || cls === "FORMAT") {
+    const cp = codePoints[i] as number;
+    const cls = classes[i] as CharClass;
+
+    if (cls === "RTL") {
       push("RTL", cp);
       i += 1;
       continue;
     }
-    if (cls === "LATIN") {
-      push("LTR", cp);
+    if (cls === "MARK" || cls === "FORMAT") {
+      // Marks/format chars ride with a preceding RTL run (ZWNJ inside
+      // `می‌شود`); anywhere else they are neutral (a ZWNJ between Latin
+      // letters must not flip the whole line to RTL).
+      const last = raw[raw.length - 1];
+      push(last && last.kind === "RTL" ? "RTL" : "NEUTRAL", cp);
       i += 1;
       continue;
     }
-    if (cls === "NUMBER") {
+    if (cls === "LATIN" || cls === "NUMBER") {
       push("LTR", cp);
       i += 1;
       continue;
     }
     // NEUTRAL: glue into a neighbouring LTR token when it sits between two
-    // LTR-able characters (digits/latin around - _ . / :), otherwise its
-    // own neutral run.
-    const prev = i > 0 ? (codePoints[i - 1] as number) : null;
-    const next = i + 1 < codePoints.length ? (codePoints[i + 1] as number) : null;
-    const prevLtr =
-      prev !== null && (classify(prev) === "LATIN" || classify(prev) === "NUMBER");
-    const nextLtr =
-      next !== null && (classify(next) === "LATIN" || classify(next) === "NUMBER");
-    const prevDigit = prev !== null && classify(prev) === "NUMBER";
-    const nextDigit = next !== null && classify(next) === "NUMBER";
+    // LTR-able characters, otherwise its own neutral run.
+    const prev = i > 0 ? (classes[i - 1] as CharClass) : null;
+    const next = i + 1 < codePoints.length ? (classes[i + 1] as CharClass) : null;
+    const prevLtr = prev === "LATIN" || prev === "NUMBER";
+    const nextLtr = next === "LATIN" || next === "NUMBER";
+    const prevDigit = prev === "NUMBER";
+    const nextDigit = next === "NUMBER";
 
     if (isIntraNumberSeparator(cp) && prevDigit && nextDigit) {
       push("LTR", cp);
@@ -280,9 +420,9 @@ function segmentRuns(codePoints: number[]): Run[] {
     const prevKind = r > 0 ? (raw[r - 1] as Run).kind : null;
     const nextKind = r + 1 < raw.length ? (raw[r + 1] as Run).kind : null;
     if (prevKind === "LTR" && nextKind === "LTR") {
-      // Email/domain style: merge with the previous LTR run (the next LTR
-      // run merges in turn when the loop reaches... it does not — so merge
-      // forward explicitly here).
+      // Email/domain style: merge with the neighbouring LTR runs (the next
+      // LTR run merges in turn when the loop reaches... it does not — so
+      // merge forward explicitly here). Unmirrored per N1.
       const prev = resolved[resolved.length - 1] as Run;
       prev.codePoints.push(...run.codePoints);
       const following = raw[r + 1] as Run;
@@ -301,11 +441,20 @@ function segmentRuns(codePoints: number[]): Run[] {
       const following = raw[r + 1] as Run;
       following.codePoints.unshift(...run.codePoints);
     } else if (prevKind === "LTR" && nextKind === null) {
+      // Trailing neutral after LTR joins it — EXCEPT mirrorable brackets,
+      // which are RTL-side (mirrored) per N2 and stay standalone.
       const prev = resolved[resolved.length - 1] as Run;
-      prev.codePoints.push(...run.codePoints);
+      const rest = run.codePoints.filter((cp) => !MIRROR_MAP.has(cp));
+      const mirrors = run.codePoints.filter((cp) => MIRROR_MAP.has(cp));
+      if (rest.length > 0) prev.codePoints.push(...rest);
+      if (mirrors.length > 0) resolved.push({ kind: "NEUTRAL", codePoints: mirrors });
     } else if (prevKind === null && nextKind === "LTR") {
+      // Leading neutral before LTR joins it — EXCEPT mirrorable brackets.
       const following = raw[r + 1] as Run;
-      following.codePoints.unshift(...run.codePoints);
+      const rest = run.codePoints.filter((cp) => !MIRROR_MAP.has(cp));
+      const mirrors = run.codePoints.filter((cp) => MIRROR_MAP.has(cp));
+      if (rest.length > 0) following.codePoints.unshift(...rest);
+      if (mirrors.length > 0) resolved.push({ kind: "NEUTRAL", codePoints: mirrors });
     } else {
       resolved.push(run);
     }
@@ -314,159 +463,157 @@ function segmentRuns(codePoints: number[]): Run[] {
 }
 
 // ---------------------------------------------------------------------------
-// Arabic shaping of one RTL run (logical order in, visual clusters out)
-// ---------------------------------------------------------------------------
-
-interface Cluster {
-  /** Shaped base code point (presentation form or pass-through). */
-  base: number;
-  /** Combining marks rendered with the base, in logical order. */
-  marks: number[];
-  /** True when the base is a lam-alef ligature (marks of both chars). */
-  ligature: boolean;
-}
-
-/**
- * Shapes one RTL run: contextual forms are chosen from logical neighbours,
- * then lam-alef pairs are fused. FORMAT characters (ZWNJ/ZWJ) steer joining
- * and vanish; combining marks attach to their base cluster.
- */
-function shapeRtlRun(codePoints: number[]): Cluster[] {
-  interface Cell {
-    cp: number;
-    entry: JoiningEntry | null;
-    /** Non-joining pass-through (neutral punctuation, tatweel, ...). */
-    opaque: boolean;
-    marks: number[];
-    forceBreakBefore: boolean;
-    forceJoinBefore: boolean;
-  }
-
-  // Build cells: marks attach to the previous cell; FORMAT chars set flags
-  // on the boundary instead of becoming cells.
-  const cells: Cell[] = [];
-  let breakBeforeNext = false;
-  let joinBeforeNext = false;
-  for (const cp of codePoints) {
-    if (cp === ZWNJ) {
-      breakBeforeNext = true;
-      joinBeforeNext = false;
-      continue;
-    }
-    if (cp === ZWJ) {
-      joinBeforeNext = true;
-      breakBeforeNext = false;
-      continue;
-    }
-    if (isCombiningMark(cp)) {
-      const target = cells[cells.length - 1];
-      if (target) target.marks.push(cp);
-      // A leading mark with no base is dropped (nothing to attach to).
-      continue;
-    }
-    const entry = JOINING_TABLE.get(cp) ?? null;
-    cells.push({
-      cp,
-      entry,
-      opaque: entry === null,
-      marks: [],
-      forceBreakBefore: breakBeforeNext,
-      forceJoinBefore: joinBeforeNext,
-    });
-    breakBeforeNext = false;
-    joinBeforeNext = false;
-  }
-
-  const joinsWithPrevious = (index: number): boolean => {
-    if (index <= 0) return false;
-    const current = cells[index] as Cell;
-    const prev = cells[index - 1] as Cell;
-    if (current.opaque || prev.opaque) return false;
-    if (current.forceBreakBefore) return false;
-    if (current.forceJoinBefore) return true;
-    if (!current.entry || !prev.entry) return false;
-    // Previous must join forward (dual) and current must join backward.
-    return prev.entry.type === "D" && current.entry.type !== "U";
-  };
-
-  const joinsWithNext = (index: number): boolean =>
-    index + 1 < cells.length && joinsWithPrevious(index + 1);
-
-  // Choose contextual forms, fusing lam-alef pairs.
-  const clusters: Cluster[] = [];
-  let i = 0;
-  while (i < cells.length) {
-    const cell = cells[i] as Cell;
-    if (cell.opaque) {
-      clusters.push({ base: cell.cp, marks: cell.marks, ligature: false });
-      i += 1;
-      continue;
-    }
-    // Lam-alef fusion: lam joined to a following alef variant.
-    if (cell.cp === LAM && i + 1 < cells.length) {
-      const next = cells[i + 1] as Cell;
-      const ligature = LAM_ALEF_LIGATURES.get(next.cp);
-      if (ligature && !next.opaque && joinsWithNext(i)) {
-        const joinPrev = joinsWithPrevious(i);
-        clusters.push({
-          base: joinPrev ? ligature[1] : ligature[0],
-          marks: [...cell.marks, ...next.marks],
-          ligature: true,
-        });
-        i += 2;
-        continue;
-      }
-    }
-    const entry = cell.entry as JoiningEntry;
-    const joinPrev = joinsWithPrevious(i);
-    const joinNext = joinsWithNext(i);
-    let form: number | null;
-    if (joinPrev && joinNext) form = entry.forms[2] ?? entry.forms[0];
-    else if (joinNext) form = entry.forms[1] ?? entry.forms[0];
-    else if (joinPrev) form = entry.forms[3] ?? entry.forms[0];
-    else form = entry.forms[0];
-    clusters.push({ base: form ?? cell.cp, marks: cell.marks, ligature: false });
-    i += 1;
-  }
-  return clusters;
-}
-
-// ---------------------------------------------------------------------------
-// Public API
+// Fragments (the drawable contract)
 // ---------------------------------------------------------------------------
 
 /**
- * Converts one logical-order line into the visual-order string a
- * left-to-right renderer (`pdf-lib`) must draw.
+ * One drawable piece of a logical line, in VISUAL (left-to-right) order.
  *
- * Pure left-to-right input (numbers, Latin identifiers such as invoice
- * numbers or IBANs) is returned unchanged. Anything containing Persian /
- * Arabic letters is shaped and bidi-reordered as described above.
+ *   - `rtl`:     logical-order text for fontkit to reverse + GSUB-shape.
+ *                Contains Arabic-script letters; never Latin or digits.
+ *   - `ltr`:     text fontkit renders as-is (no Arabic-script chars inside).
+ *   - `ltr-rev`: text that WOULD trigger fontkit's RTL reversal (Persian /
+ *                Arabic-Indic digits, ٪ ، ...), passed PRE-REVERSED so the
+ *                render restores the intended order. Never contains Latin.
+ *
+ * Invariants (all covered by tests): no fragment mixes Arabic-script letters
+ * with Latin/digits; every `rtl`/`ltr-rev` fragment triggers fontkit's RTL
+ * path; every `ltr` fragment triggers its LTR path.
  */
-export function toVisualPersianText(input: string): string {
-  if (input === "") return "";
+export interface PdfTextFragment {
+  text: string;
+  direction: "rtl" | "ltr" | "ltr-rev";
+}
+
+/**
+ * Splits LTR-run text into maximal fontkit-homogeneous sub-runs: spans
+ * containing Arabic-script chars (which trigger fontkit's RTL reversal) are
+ * emitted pre-reversed; everything else is emitted as-is.
+ */
+function splitLtrFragment(codePoints: number[]): PdfTextFragment[] {
+  const out: PdfTextFragment[] = [];
+  let i = 0;
+  while (i < codePoints.length) {
+    const firing = firesFontkitRtl(codePoints[i] as number);
+    let j = i + 1;
+    while (j < codePoints.length && firesFontkitRtl(codePoints[j] as number) === firing) {
+      j += 1;
+    }
+    const slice = codePoints.slice(i, j);
+    if (firing) {
+      out.push({ direction: "ltr-rev", text: fromCodePoints([...slice].reverse()) });
+    } else {
+      out.push({ direction: "ltr", text: fromCodePoints(slice) });
+    }
+    i = j;
+  }
+  return out.filter((fragment) => fragment.text !== "");
+}
+
+/** Fast path: pure printable ASCII can never contain RTL (single LTR draw). */
+function isPrintableAscii(text: string): boolean {
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code < 0x20 || code > 0x7e) return false;
+  }
+  return true;
+}
+
+/**
+ * Converts one logical-order line into the visual-order fragments the PDF
+ * renderer must draw (one `drawText` call per fragment, left to right).
+ *
+ * Pure-LTR input yields LTR fragments in input order; anything containing
+ * Arabic-script letters is bidi-reordered as described above. RTL fragments
+ * keep logical text (fontkit shapes); LTR fragments keep visual text.
+ */
+export function shapePersianLine(input: string): PdfTextFragment[] {
+  if (input === "") return [];
+  if (isPrintableAscii(input)) return [{ text: input, direction: "ltr" }];
+
   const codePoints = toCodePoints(input);
-  const runs = segmentRuns(codePoints);
+  const classes = resolveWeakTypes(codePoints, codePoints.map(classify));
+  const runs = segmentRuns(codePoints, classes);
   const hasRtl = runs.some((run) => run.kind === "RTL");
-  if (!hasRtl) return input;
+  if (!hasRtl) {
+    // No reordering — but the line may still contain Arabic-script digits /
+    // punctuation (۱۲۳, ٪) that trigger fontkit's RTL path, so split it.
+    return splitLtrFragment(codePoints);
+  }
+
+  interface Work {
+    kind: "RTL" | "LTR";
+    codePoints: number[];
+  }
 
   const ordered = [...runs].reverse();
-  const out: number[] = [];
+  const visual: Work[] = [];
+  // A standalone neutral run has embedding (RTL-paragraph) direction, so in
+  // visual order its internal order is reversed and mirrored (N2): logical
+  // `موبایل: 0912` shows the `: ` as ` :` between the runs.
+  const toVisualNeutral = (cps: number[]): number[] =>
+    [...cps].reverse().map(mirrorChar);
+  let pendingLeading: number[] | null = null;
+
   for (const run of ordered) {
-    if (run.kind === "RTL") {
-      const clusters = shapeRtlRun(run.codePoints);
-      for (let c = clusters.length - 1; c >= 0; c -= 1) {
-        const cluster = clusters[c] as Cluster;
-        // Opaque pass-through chars (brackets, punctuation) mirror; shaped
-        // Arabic bases are never in the mirror map, so this is a no-op for
-        // them. Combining marks are never mirrored.
-        out.push(MIRROR_MAP.get(cluster.base) ?? cluster.base, ...cluster.marks);
+    if (run.kind === "NEUTRAL") {
+      const visualNeutral = toVisualNeutral(run.codePoints);
+      const prev = visual[visual.length - 1];
+      if (!prev) {
+        pendingLeading = [...(pendingLeading ?? []), ...visualNeutral];
+        continue;
       }
-    } else if (run.kind === "LTR") {
-      out.push(...run.codePoints);
+      if (prev.kind === "LTR") {
+        prev.codePoints.push(...visualNeutral);
+      } else {
+        // RTL fragments are drawn logical (fontkit reverses): prepend the
+        // neutral part in the order that reversal restores.
+        prev.codePoints.unshift(...[...visualNeutral].reverse());
+      }
+      continue;
+    }
+    if (run.kind === "RTL") {
+      // Own chars mirrored exactly once (unpaired brackets merged into the
+      // run); attached neutral parts were already mirrored at attach time.
+      const frag: Work = { kind: "RTL", codePoints: run.codePoints.map(mirrorChar) };
+      if (pendingLeading) {
+        frag.codePoints.push(...[...pendingLeading].reverse());
+        pendingLeading = null;
+      }
+      visual.push(frag);
+      continue;
+    }
+    const frag: Work = { kind: "LTR", codePoints: [...run.codePoints] };
+    if (pendingLeading) {
+      frag.codePoints.unshift(...pendingLeading);
+      pendingLeading = null;
+    }
+    visual.push(frag);
+  }
+  if (pendingLeading) {
+    // Defensive: a line of only neutral runs with hasRtl true is impossible
+    // (neutral runs never set hasRtl), but never drop text.
+    visual.push({ kind: "LTR", codePoints: pendingLeading });
+  }
+
+  const fragments: PdfTextFragment[] = [];
+  for (const frag of visual) {
+    if (frag.kind === "RTL") {
+      if (frag.codePoints.length === 0) continue;
+      if (frag.codePoints.some((cp) => firesFontkitRtl(cp))) {
+        fragments.push({ direction: "rtl", text: fromCodePoints(frag.codePoints) });
+      } else {
+        // RTL-kind run with no Arabic-script char (an embedding-side bracket
+        // pair's punctuation, e.g. ` )` in `۲۰,۰۰۰ (۱۰٪)`): fontkit would
+        // NOT reverse it, so emit it in visual order directly as LTR.
+        fragments.push({
+          direction: "ltr",
+          text: fromCodePoints([...frag.codePoints].reverse()),
+        });
+      }
     } else {
-      for (const cp of run.codePoints) out.push(MIRROR_MAP.get(cp) ?? cp);
+      fragments.push(...splitLtrFragment(frag.codePoints));
     }
   }
-  return String.fromCodePoint(...out);
+  return fragments;
 }

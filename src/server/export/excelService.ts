@@ -107,22 +107,34 @@ export async function generateInvoiceExcel(model: InvoicePreviewModel): Promise<
 
   let row = 1;
 
+  // Merged cells never auto-fit their row height in Excel, so wrapped text
+  // in merged ranges gets an estimated height (over-estimating slightly
+  // beats clipped text).
+  const fitMergedRow = (rowIndex: number, text: string, charsPerLine: number, lineHeight: number): void => {
+    const lines = Math.max(1, Math.ceil([...text].length / charsPerLine));
+    ws.getRow(rowIndex).height = Math.max(ws.getRow(rowIndex).height ?? 0, lines * lineHeight);
+  };
+
   // ---- Title ------------------------------------------------------------
   ws.mergeCells(`A${row}:I${row}`);
   const titleCell = ws.getCell(`A${row}`);
-  titleCell.value = `${seller?.businessName ?? "—"} — ${formatInvoiceType(invoice.invoiceType)}`;
+  const titleText = `${seller?.businessName ?? "—"} — ${formatInvoiceType(invoice.invoiceType)}`;
+  titleCell.value = titleText;
   titleCell.font = { size: 16, bold: true, color: { argb: "FF111827" } };
-  titleCell.alignment = { horizontal: "center", vertical: "middle" };
-  ws.getRow(row).height = 28;
+  titleCell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+  fitMergedRow(row, titleText, 80, 21);
   row += 1;
 
   ws.mergeCells(`A${row}:I${row}`);
   const subCell = ws.getCell(`A${row}`);
-  subCell.value = model.isDraft
+  // Drafts have no official number — never fall back to a row placeholder.
+  const subText = model.isDraft
     ? `پیش‌نویس (بدون شماره رسمی) — ${formatPersianDate(invoice.issueDate)}`
-    : `شماره ${toPersianDigits(invoice.invoiceNumber)} — ${formatPersianDate(invoice.issueDate)}`;
+    : `شماره ${toPersianDigits(model.officialNumber ?? invoice.invoiceNumber)} — ${formatPersianDate(invoice.issueDate)}`;
+  subCell.value = subText;
   subCell.font = { size: 11, color: { argb: "FF6B7280" } };
-  subCell.alignment = { horizontal: "center", vertical: "middle" };
+  subCell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+  fitMergedRow(row, subText, 110, 15);
   row += 2;
 
   // ---- Key/value helper (label in A, value merged B:I) --------------------
@@ -132,6 +144,9 @@ export async function generateInvoiceExcel(model: InvoicePreviewModel): Promise<
     cell.value = title;
     cell.font = { size: 12, bold: true, color: { argb: "FF111827" } };
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF3F4F6" } };
+    cell.alignment = { vertical: "middle" };
+    cell.border = THIN_BORDER;
+    ws.getRow(row).height = Math.max(ws.getRow(row).height ?? 0, 20);
     row += 1;
   };
 
@@ -140,10 +155,13 @@ export async function generateInvoiceExcel(model: InvoicePreviewModel): Promise<
     const labelCell = ws.getCell(`A${row}`);
     labelCell.value = label;
     labelCell.font = { size: 11, color: { argb: "FF6B7280" } };
+    labelCell.alignment = { vertical: "middle" };
     const valueCell = ws.getCell(`B${row}`);
     valueCell.value = value;
     valueCell.font = { size: 11, color: { argb: "FF111827" } };
+    valueCell.alignment = { vertical: "middle", wrapText: true };
     if (numFmt) valueCell.numFmt = numFmt;
+    if (typeof value === "string") fitMergedRow(row, value, 100, 15);
     row += 1;
   };
 
@@ -204,11 +222,18 @@ export async function generateInvoiceExcel(model: InvoicePreviewModel): Promise<
 
   if (invoice.items.length === 0) {
     ws.mergeCells(`A${row}:I${row}`);
-    ws.getCell(`A${row}`).value = "این فاکتور قلمی ندارد.";
-    ws.getCell(`A${row}`).alignment = { horizontal: "center" };
+    const emptyCell = ws.getCell(`A${row}`);
+    emptyCell.value = "این فاکتور قلمی ندارد.";
+    emptyCell.font = { size: 11, color: { argb: "FF6B7280" } };
+    emptyCell.alignment = { horizontal: "center", vertical: "middle" };
+    emptyCell.border = THIN_BORDER;
     row += 1;
   }
 
+  // Column kinds drive cell alignment: counters center, Persian text reads
+  // from the right, money keeps Excel's numeric alignment.
+  const CENTER_COLUMNS = new Set([0, 3, 6]);
+  const RIGHT_COLUMNS = new Set([1, 2, 4]);
   invoice.items.forEach((item, index) => {
     const values: Array<{ value: ExcelJS.CellValue; numFmt?: string }> = [
       { value: index + 1 },
@@ -225,7 +250,15 @@ export async function generateInvoiceExcel(model: InvoicePreviewModel): Promise<
       const cell = ws.getCell(row, colIndex + 1);
       cell.value = value;
       cell.font = { size: 11, color: { argb: "FF111827" } };
-      cell.alignment = { vertical: "middle", wrapText: true };
+      cell.alignment = {
+        vertical: "middle",
+        wrapText: true,
+        horizontal: CENTER_COLUMNS.has(colIndex)
+          ? "center"
+          : RIGHT_COLUMNS.has(colIndex)
+            ? "right"
+            : undefined,
+      };
       if (numFmt) cell.numFmt = numFmt;
       cell.border = THIN_BORDER;
     });
@@ -249,10 +282,18 @@ export async function generateInvoiceExcel(model: InvoicePreviewModel): Promise<
     const labelCell = ws.getCell(`A${row}`);
     labelCell.value = label;
     labelCell.font = { size: 11, bold: strong, color: { argb: "FF111827" } };
+    labelCell.alignment = { vertical: "middle" };
     const valueCell = ws.getCell(`B${row}`);
     valueCell.value = value;
     valueCell.numFmt = EXCEL_MONEY_FORMAT;
     valueCell.font = { size: strong ? 12 : 11, bold: strong, color: { argb: "FF111827" } };
+    valueCell.alignment = { vertical: "middle" };
+    if (strong) {
+      // Dividers above the grand-total rows, mirroring the PDF.
+      const divider = { style: "thin" as const, color: { argb: "FFD1D5DB" } };
+      labelCell.border = { ...THIN_BORDER, top: divider };
+      valueCell.border = { ...THIN_BORDER, top: divider };
+    }
     row += 1;
   };
   totalRow("جمع اقلام", moneyCell(invoice.subtotal));
@@ -278,11 +319,22 @@ export async function generateInvoiceExcel(model: InvoicePreviewModel): Promise<
     notesCell.value = invoice.notes;
     notesCell.font = { size: 11, color: { argb: "FF4B5563" } };
     notesCell.alignment = { wrapText: true, vertical: "top" };
+    fitMergedRow(row, invoice.notes, 110, 15);
     row += 1;
   }
 
   // Freeze below the items header so long tables keep their labels.
   ws.views = [{ state: "frozen", xSplit: 0, ySplit: headerRowIndex, rightToLeft: true }];
+
+  // Print-ready: portrait A4, fit to page width, items header on every page.
+  ws.pageSetup = {
+    paperSize: 9,
+    orientation: "portrait",
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    printTitlesRow: `${headerRowIndex}:${headerRowIndex}`,
+  };
 
   const buffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(buffer);

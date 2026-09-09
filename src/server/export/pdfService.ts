@@ -16,17 +16,19 @@ import {
   formatPersianNumber,
   toPersianDigits,
 } from "@/lib/formatters";
-import { toVisualPersianText } from "./persianText";
+import { shapePersianLine } from "./persianText";
 import { DRAFT_EXPORT_NOTICE } from "./exportCopy";
 import { getVazirmatnFontBytes } from "./fontLoader";
-import { fetchImageAsPng } from "./imageAssets";
+import { fetchImageAsPng, logoNeedsWhiteBacking } from "./imageAssets";
 
 /**
  * Server-side invoice PDF generation (Export & Sharing V1).
  *
  * Deterministic A4 output rendered with `pdf-lib` + the embedded Vazirmatn
- * font (correct Persian/Arabic glyphs via the presentation-forms shaper in
- * `./persianText.ts` — `pdf-lib` performs no complex text layout itself).
+ * font. Correct Persian/Arabic glyphs come from the font's own GSUB shaper
+ * (driven through fontkit); `./persianText.ts` only splits each logical line
+ * into single-direction fragments because fontkit detects ONE script per
+ * `drawText` call and fully reverses RTL-script runs.
  *
  * Data law (same as the preview — this module recomputes NOTHING):
  *   - the input is the authorized `InvoicePreviewModel`: finalized rows
@@ -275,9 +277,17 @@ function newPage(doc: PDFDocument): PDFPage {
   return doc.addPage([PDF_A4_WIDTH, PDF_A4_HEIGHT]);
 }
 
-/** Visual width of a LOGICAL string at a size (shaped, as drawn). */
+/**
+ * Visual width of a LOGICAL line at a size: the sum of its fragment widths.
+ * Every fragment is single-direction, so fontkit's per-call script detection
+ * (LTR preserved, RTL reversed) measures exactly what gets drawn.
+ */
 function visualWidth(font: PDFFont, logical: string, size: number): number {
-  return font.widthOfTextAtSize(toVisualPersianText(logical), size);
+  let width = 0;
+  for (const fragment of shapePersianLine(logical)) {
+    width += font.widthOfTextAtSize(fragment.text, size);
+  }
+  return width;
 }
 
 /** Greedy word-wrap of logical text into logical lines fitting maxWidth. */
@@ -306,6 +316,14 @@ function wrapLogical(font: PDFFont, text: string, size: number, maxWidth: number
 
 type TextAlign = "right" | "center" | "left";
 
+/**
+ * Draws one LOGICAL line. The line is split into visual-order fragments
+ * (see `./persianText.ts`) and each fragment gets its own `drawText` call:
+ * fontkit detects ONE script per call and fully reverses RTL-script runs,
+ * so mixed-direction text must never be drawn (or measured) in one call.
+ * RTL fragments are drawn logical (fontkit reverses + GSUB-shapes them);
+ * LTR fragments are drawn as positioned by the segmenter.
+ */
 function drawText(
   r: Renderer,
   logical: string,
@@ -314,21 +332,18 @@ function drawText(
   size: number,
   color: RGB,
   align: TextAlign = "right",
-  maxWidth?: number,
 ): void {
-  const visual = toVisualPersianText(logical);
-  const width = r.font.widthOfTextAtSize(visual, size);
+  const fragments = shapePersianLine(logical);
+  const widths = fragments.map((fragment) => r.font.widthOfTextAtSize(fragment.text, size));
+  const total = widths.reduce((sum, width) => sum + width, 0);
   let x = xAnchor;
-  if (align === "right") x = xAnchor - width;
-  else if (align === "center") x = xAnchor - width / 2;
-  if (maxWidth !== undefined && width > maxWidth) {
-    // Defensive clip for values that must never overflow their column (ids,
-    // IBANs): draw from the anchor and let the overflow run under the
-    // margin rather than over neighbouring columns.
-    if (align === "right") x = xAnchor - maxWidth;
-    else if (align === "center") x = xAnchor - maxWidth / 2;
-  }
-  r.page.drawText(visual, { x, y, size, font: r.font, color });
+  if (align === "right") x = xAnchor - total;
+  else if (align === "center") x = xAnchor - total / 2;
+  fragments.forEach((fragment, index) => {
+    if (fragment.text === "") return;
+    r.page.drawText(fragment.text, { x, y, size, font: r.font, color });
+    x += widths[index] as number;
+  });
 }
 
 function drawWrapped(
@@ -359,16 +374,18 @@ function ensureSpace(r: Renderer, needed: number): void {
 }
 
 function sectionHeading(r: Renderer, title: string): void {
-  ensureSpace(r, 30);
+  // Heading + rule consume 19pt; the extra room keeps at least one body
+  // line (or the table header) on the same page — no orphan headings.
+  ensureSpace(r, 44);
   drawText(r, title, CONTENT_RIGHT, r.y, 11.5, INK, "right");
-  r.y -= 8;
+  r.y -= 7;
   r.page.drawLine({
     start: { x: CONTENT_LEFT, y: r.y },
     end: { x: CONTENT_RIGHT, y: r.y },
     thickness: 0.75,
     color: LINE,
   });
-  r.y -= 14;
+  r.y -= 12;
 }
 
 function renderHeader(r: Renderer, content: PdfContent, hasLogo: boolean): void {
@@ -389,7 +406,7 @@ function renderHeader(r: Renderer, content: PdfContent, hasLogo: boolean): void 
 
   drawText(r, content.businessName, textRight, bandBottom + 44, 16, fg, "right");
   if (content.slogan) {
-    drawWrapped(r, content.slogan, textRight, bandBottom + 26, 9, fg, textRight - CONTENT_LEFT, 12);
+    drawWrapped(r, content.slogan, textRight, bandBottom + 25, 9.5, fg, textRight - CONTENT_LEFT, 12.5);
   }
 
   r.y = bandBottom - 22;
@@ -409,34 +426,42 @@ async function embedAssetPng(
 }
 
 function renderTitleMeta(r: Renderer, content: PdfContent): void {
-  ensureSpace(r, 120);
-  drawText(r, content.documentTitle, PDF_A4_WIDTH / 2, r.y, 15, INK, "center");
-  r.y -= 16;
-  drawText(r, content.documentSubtitle, PDF_A4_WIDTH / 2, r.y, 9, MUTED, "center");
-  r.y -= 24;
+  ensureSpace(r, 130);
+  drawText(r, content.documentTitle, PDF_A4_WIDTH / 2, r.y, 16, INK, "center");
+  r.y -= 18;
+  drawText(r, content.documentSubtitle, PDF_A4_WIDTH / 2, r.y, 10, MUTED, "center");
+  r.y -= 26;
 
   // Meta grid: two columns of label/value pairs, right column first (RTL).
+  // A value too long for its column (30-digit official numbers) wraps under
+  // its label instead of colliding with the neighbouring column.
   const colGap = 16;
   const colWidth = (CONTENT_WIDTH - colGap) / 2;
   const rightColRight = CONTENT_RIGHT;
   const leftColRight = CONTENT_RIGHT - colWidth - colGap;
-  const labelValue = (label: string, value: string, xRight: number, y: number): void => {
+  const labelValue = (label: string, value: string, xRight: number, y: number): number => {
     drawText(r, `${label}:`, xRight, y, 9, FAINT, "right");
     const labelWidth = visualWidth(r.font, `${label}:`, 9);
-    drawText(r, value, xRight - labelWidth - 6, y, 9.5, INK, "right");
+    const valueWidth = visualWidth(r.font, value, 10);
+    if (labelWidth + 6 + valueWidth <= colWidth) {
+      drawText(r, value, xRight - labelWidth - 6, y, 10, INK, "right");
+      return 0;
+    }
+    drawText(r, value, xRight, y - 13, 10, INK, "right");
+    return 13;
   };
   const numberLabel = content.isDraft ? "پیش‌نویس (بدون شماره رسمی)" : "شماره فاکتور";
-  labelValue(numberLabel, content.officialNumber ?? "—", rightColRight, r.y);
-  labelValue("تاریخ صدور", content.issueDate, leftColRight, r.y);
-  r.y -= 15;
+  const overflowRight = labelValue(numberLabel, content.officialNumber ?? "—", rightColRight, r.y);
+  const overflowLeft = labelValue("تاریخ صدور", content.issueDate, leftColRight, r.y);
+  r.y -= 16 + Math.max(overflowRight, overflowLeft);
   labelValue("وضعیت", content.statusLabel, rightColRight, r.y);
   labelValue("سررسید", content.dueDate, leftColRight, r.y);
-  r.y -= 15;
+  r.y -= 16;
 
   if (content.isDraft) {
     const notice = DRAFT_EXPORT_NOTICE;
-    const lines = wrapLogical(r.font, notice, 9, CONTENT_WIDTH - 24);
-    const boxHeight = lines.length * 13 + 18;
+    const lines = wrapLogical(r.font, notice, 9.5, CONTENT_WIDTH - 24);
+    const boxHeight = lines.length * 13.5 + 20;
     ensureSpace(r, boxHeight + 8);
     r.page.drawRectangle({
       x: CONTENT_LEFT,
@@ -447,7 +472,7 @@ function renderTitleMeta(r: Renderer, content: PdfContent): void {
       borderColor: DRAFT_BORDER,
       borderWidth: 1,
     });
-    drawWrapped(r, notice, CONTENT_RIGHT - 12, r.y - 4, 9, rgb(0.55, 0.38, 0.06), CONTENT_WIDTH - 24, 13);
+    drawWrapped(r, notice, CONTENT_RIGHT - 12, r.y - 4, 9.5, rgb(0.55, 0.38, 0.06), CONTENT_WIDTH - 24, 13.5);
     r.y -= boxHeight + 2;
   }
   r.y -= 6;
@@ -460,31 +485,33 @@ function renderSeller(r: Renderer, content: PdfContent): void {
   if (content.contacts) lines.push(content.contacts);
   if (content.address) lines.push(`نشانی: ${content.address}`);
   for (const line of lines) {
-    ensureSpace(r, 16);
-    r.y = drawWrapped(r, line, CONTENT_RIGHT, r.y, 9, MUTED, CONTENT_WIDTH, 13) - 2;
+    ensureSpace(r, 18);
+    r.y = drawWrapped(r, line, CONTENT_RIGHT, r.y, 10, MUTED, CONTENT_WIDTH, 14.5) - 2;
   }
   const banking: Array<[string, string]> = [];
   if (content.cardNumber) banking.push(["شماره کارت", content.cardNumber]);
   if (content.accountNumber) banking.push(["شماره حساب", content.accountNumber]);
   if (content.iban) banking.push(["شبا", content.iban]);
   if (banking.length > 0) {
-    ensureSpace(r, banking.length * 15 + 8);
+    ensureSpace(r, banking.length * 17 + 8);
     for (const [label, value] of banking) {
-      drawText(r, `${label}:`, CONTENT_RIGHT, r.y, 9, FAINT, "right");
-      const labelWidth = visualWidth(r.font, `${label}:`, 9);
-      // Banking identifiers are Latin/digit runs: draw LTR from the left so
-      // long IBANs never collide with the label.
-      const visual = toVisualPersianText(value);
-      const valueWidth = r.font.widthOfTextAtSize(visual, 9);
+      drawText(r, `${label}:`, CONTENT_RIGHT, r.y, 10, FAINT, "right");
+      const labelWidth = visualWidth(r.font, `${label}:`, 10);
+      // Banking identifiers are drawn as one logical line (label gap, then
+      // the value right-aligned): long IBANs grow leftwards and never
+      // collide with the label.
       const valueRight = CONTENT_RIGHT - labelWidth - 8;
-      r.page.drawText(visual, {
-        x: Math.max(CONTENT_LEFT, valueRight - valueWidth),
-        y: r.y,
-        size: 9,
-        font: r.font,
-        color: INK,
-      });
-      r.y -= 14;
+      const valueWidth = visualWidth(r.font, value, 10);
+      drawText(
+        r,
+        value,
+        Math.max(CONTENT_LEFT + valueWidth, valueRight),
+        r.y,
+        10,
+        INK,
+        "right",
+      );
+      r.y -= 16;
     }
   }
   r.y -= 8;
@@ -499,8 +526,8 @@ function renderCustomer(r: Renderer, content: PdfContent): void {
     r.y -= 16;
   }
   for (const line of content.customerLines) {
-    ensureSpace(r, 16);
-    r.y = drawWrapped(r, line, CONTENT_RIGHT, r.y, 9, MUTED, CONTENT_WIDTH, 13) - 2;
+    ensureSpace(r, 18);
+    r.y = drawWrapped(r, line, CONTENT_RIGHT, r.y, 10, MUTED, CONTENT_WIDTH, 14.5) - 2;
   }
   r.y -= 8;
 }
@@ -514,7 +541,9 @@ interface TableColumn {
 }
 
 function tableColumns(): TableColumn[] {
-  const widths = { row: 30, qty: 52, unit: 48, price: 78, discount: 78, total: 84 };
+  // Unit/discount columns get breathing room for 10pt identifiers such as
+  // `۲۰,۰۰۰ (۱۰٪)`; the description column absorbs the difference.
+  const widths = { row: 30, qty: 52, unit: 56, price: 78, discount: 86, total: 84 };
   const descWidth = CONTENT_WIDTH - (widths.row + widths.qty + widths.unit + widths.price + widths.discount + widths.total);
   let cursor = CONTENT_RIGHT;
   const col = (title: string, width: number, align: TextAlign): TableColumn => {
@@ -534,7 +563,7 @@ function tableColumns(): TableColumn[] {
 }
 
 function renderTableHeader(r: Renderer, columns: TableColumn[], headerBg: RGB): number {
-  const height = 22;
+  const height = 28;
   ensureSpace(r, height + 4);
   const top = r.y;
   r.page.drawRectangle({
@@ -550,9 +579,9 @@ function renderTableHeader(r: Renderer, columns: TableColumn[], headerBg: RGB): 
     const cx = column.align === "center" ? column.right - column.width / 2 : column.right - 4;
     const anchorAlign: TextAlign = column.align === "left" ? "left" : column.align;
     if (column.align === "left") {
-      drawText(r, column.title, column.right - column.width + 4, top - 15, 8.5, MUTED, "left");
+      drawText(r, column.title, column.right - column.width + 4, top - 19, 11, MUTED, "left");
     } else {
-      drawText(r, column.title, cx, top - 15, 8.5, MUTED, anchorAlign);
+      drawText(r, column.title, cx, top - 19, 11, MUTED, anchorAlign);
     }
   }
   // Vertical separators.
@@ -573,22 +602,32 @@ function renderTableHeader(r: Renderer, columns: TableColumn[], headerBg: RGB): 
 }
 
 function renderItemsTable(r: Renderer, content: PdfContent, headerBg: RGB): void {
-  sectionHeading(r, `اقلام فاکتور (${content.currencyUnit})`);
   const columns = tableColumns();
+  // Keep the heading glued to the table header + first body row, measured
+  // with the first row's REAL height (a tall wrapped first row must not be
+  // stranded on the next page while its heading stays behind).
+  const descColWidth = (columns[1] as TableColumn).width - 8;
+  const firstItem = content.items[0];
+  const firstTitleLines = firstItem ? wrapLogical(r.font, firstItem.title, 10.5, descColWidth).length : 0;
+  const firstDescLines =
+    firstItem?.description ? wrapLogical(r.font, firstItem.description, 10, descColWidth).length : 0;
+  const firstRowHeight = Math.max(26, firstTitleLines * 14 + firstDescLines * 12.5 + 12);
+  ensureSpace(r, 30 + 28 + firstRowHeight);
+  sectionHeading(r, `اقلام فاکتور (${content.currencyUnit})`);
   renderTableHeader(r, columns, headerBg);
 
   if (content.items.length === 0) {
-    ensureSpace(r, 30);
+    ensureSpace(r, 32);
     r.page.drawRectangle({
       x: CONTENT_LEFT,
-      y: r.y - 26,
+      y: r.y - 28,
       width: CONTENT_WIDTH,
-      height: 26,
+      height: 28,
       borderColor: LINE,
       borderWidth: 0.75,
     });
-    drawText(r, "این فاکتور قلمی ندارد.", PDF_A4_WIDTH / 2, r.y - 17, 9, MUTED, "center");
-    r.y -= 26;
+    drawText(r, "این فاکتور قلمی ندارد.", PDF_A4_WIDTH / 2, r.y - 18, 10, MUTED, "center");
+    r.y -= 28;
     return;
   }
 
@@ -596,9 +635,9 @@ function renderItemsTable(r: Renderer, content: PdfContent, headerBg: RGB): void
   const descWidth = descCol.width - 8;
 
   content.items.forEach((item, index) => {
-    const titleLines = wrapLogical(r.font, item.title, 9, descWidth);
-    const descLines = item.description ? wrapLogical(r.font, item.description, 8, descWidth) : [];
-    const rowHeight = Math.max(24, titleLines.length * 12 + descLines.length * 10.5 + 10);
+    const titleLines = wrapLogical(r.font, item.title, 10.5, descWidth);
+    const descLines = item.description ? wrapLogical(r.font, item.description, 10, descWidth) : [];
+    const rowHeight = Math.max(26, titleLines.length * 14 + descLines.length * 12.5 + 12);
     if (r.y - rowHeight < BOTTOM_LIMIT) {
       r.page = newPage(r.doc);
       r.pages.push(r.page);
@@ -624,27 +663,27 @@ function renderItemsTable(r: Renderer, content: PdfContent, headerBg: RGB): void
     });
 
     const cells: Array<{ column: TableColumn; lines: string[]; size: number; color: RGB }> = [
-      { column: columns[0] as TableColumn, lines: [item.rowNumber], size: 9, color: MUTED },
-      { column: descCol, lines: [], size: 9, color: INK },
-      { column: columns[2] as TableColumn, lines: [item.quantity], size: 9, color: INK },
-      { column: columns[3] as TableColumn, lines: [item.unit], size: 8.5, color: MUTED },
-      { column: columns[4] as TableColumn, lines: [item.unitPrice], size: 9, color: INK },
-      { column: columns[5] as TableColumn, lines: [item.discount], size: 8.5, color: MUTED },
-      { column: columns[6] as TableColumn, lines: [item.total], size: 9, color: INK },
+      { column: columns[0] as TableColumn, lines: [item.rowNumber], size: 10, color: MUTED },
+      { column: descCol, lines: [], size: 10.5, color: INK },
+      { column: columns[2] as TableColumn, lines: [item.quantity], size: 10.5, color: INK },
+      { column: columns[3] as TableColumn, lines: [item.unit], size: 10, color: MUTED },
+      { column: columns[4] as TableColumn, lines: [item.unitPrice], size: 10.5, color: INK },
+      { column: columns[5] as TableColumn, lines: [item.discount], size: 10, color: MUTED },
+      { column: columns[6] as TableColumn, lines: [item.total], size: 10.5, color: INK },
     ];
     // Description column: title lines + dimmer description lines.
-    let lineY = top - 14;
+    let lineY = top - 16;
     for (const line of titleLines) {
-      drawText(r, line, descCol.right - 4, lineY, 9, INK, "right");
-      lineY -= 12;
+      drawText(r, line, descCol.right - 4, lineY, 10.5, INK, "right");
+      lineY -= 14;
     }
     for (const line of descLines) {
-      drawText(r, line, descCol.right - 4, lineY, 8, MUTED, "right");
-      lineY -= 10.5;
+      drawText(r, line, descCol.right - 4, lineY, 10, MUTED, "right");
+      lineY -= 12.5;
     }
     for (const cell of cells) {
       if (cell.column === descCol) continue;
-      const cy = top - 15;
+      const cy = top - 17;
       if (cell.column.align === "center") {
         drawText(r, cell.lines[0] ?? "", cell.column.right - cell.column.width / 2, cy, cell.size, cell.color, "center");
       } else if (cell.column.align === "left") {
@@ -658,7 +697,6 @@ function renderItemsTable(r: Renderer, content: PdfContent, headerBg: RGB): void
 }
 
 function renderTotals(r: Renderer, content: PdfContent): void {
-  sectionHeading(r, "خلاصه مالی");
   const rows: Array<{ label: string; value: string; strong: boolean; muted: boolean }> = [
     { label: "جمع اقلام (پیش از تخفیف)", value: content.subtotal, strong: false, muted: false },
     { label: "مجموع تخفیف اقلام", value: content.itemDiscount, strong: false, muted: true },
@@ -673,10 +711,18 @@ function renderTotals(r: Renderer, content: PdfContent): void {
     rows.push({ label: "مانده قابل پرداخت", value: content.remainingAmount, strong: true, muted: false });
   }
 
+  // Breathing room after the items table (the heading's ascenders need
+  // clearance above the last row), then keep the whole block together.
+  r.y -= 10;
+  const blockHeight =
+    30 + rows.reduce((sum, row) => sum + (row.strong ? 22 : 18), 0) + 4;
+  ensureSpace(r, blockHeight);
+  sectionHeading(r, "خلاصه مالی");
+
   const labelZone = 250;
   for (const row of rows) {
-    ensureSpace(r, row.strong ? 24 : 18);
-    const size = row.strong ? 10.5 : 9.5;
+    ensureSpace(r, row.strong ? 26 : 20);
+    const size = row.strong ? 12 : 10.5;
     const color = row.muted ? FAINT : INK;
     if (row.label === "مبلغ نهایی فاکتور" || row.label === "مانده قابل پرداخت") {
       r.page.drawLine({
@@ -688,18 +734,20 @@ function renderTotals(r: Renderer, content: PdfContent): void {
     }
     drawText(r, row.label, CONTENT_RIGHT, r.y, size, color, "right");
     drawText(r, row.value, CONTENT_RIGHT - labelZone, r.y, size, color, "right");
-    r.y -= row.strong ? 20 : 16;
+    r.y -= row.strong ? 22 : 18;
   }
   r.y -= 4;
 }
 
 function renderNotes(r: Renderer, content: PdfContent): void {
   if (!content.notes) return;
+  const lines = wrapLogical(r.font, content.notes, 10, CONTENT_WIDTH);
+  const boxHeight = lines.length * 14.5 + 16;
+  // Keep the heading glued to its box: 30pt covers the 19pt heading, and
+  // whenever this check passes the heading's own 44pt check passes too
+  // (r.y >= 94 + box >= 124 > 108), so the two never split apart.
+  ensureSpace(r, 30 + boxHeight);
   sectionHeading(r, "توضیحات");
-  ensureSpace(r, 30);
-  const lines = wrapLogical(r.font, content.notes, 9, CONTENT_WIDTH);
-  const boxHeight = lines.length * 13 + 16;
-  ensureSpace(r, boxHeight);
   r.page.drawRectangle({
     x: CONTENT_LEFT,
     y: r.y - boxHeight + 10,
@@ -708,7 +756,7 @@ function renderNotes(r: Renderer, content: PdfContent): void {
     borderColor: LINE,
     borderWidth: 0.75,
   });
-  r.y = drawWrapped(r, content.notes, CONTENT_RIGHT - 10, r.y - 4, 9, MUTED, CONTENT_WIDTH - 20, 13) - 12;
+  r.y = drawWrapped(r, content.notes, CONTENT_RIGHT - 10, r.y - 4, 10, MUTED, CONTENT_WIDTH - 20, 14.5) - 12;
 }
 
 /** Draws stamp/signature boxes; returns the new cursor. */
@@ -721,7 +769,9 @@ function renderStampSignature(
   },
 ): void {
   if (!assets.stamp && !assets.signature) return;
-  ensureSpace(r, 110);
+  // Heading (19) + boxes (80) + captions (14) + slack: captions must clear
+  // the footer band (top edge at y=66) and the bottom limit.
+  ensureSpace(r, 124);
   sectionHeading(r, "مهر و امضا");
   let xRight = CONTENT_RIGHT;
   const drawBox = (
@@ -760,7 +810,7 @@ function renderStampSignature(
 
 function renderFooterBand(r: Renderer, content: PdfContent): void {
   if (!content.hasFooter) return;
-  const bandHeight = 34;
+  const bandHeight = 38;
   r.page.drawRectangle({
     x: 0,
     y: 28,
@@ -769,12 +819,12 @@ function renderFooterBand(r: Renderer, content: PdfContent): void {
     color: hexToRgb(content.footerBackground),
   });
   if (content.footerText) {
-    const lines = wrapLogical(r.font, content.footerText, 8.5, CONTENT_WIDTH);
+    const lines = wrapLogical(r.font, content.footerText, 9, CONTENT_WIDTH);
     const visible = lines.slice(0, 2);
-    let y = 28 + bandHeight - 14;
+    let y = 28 + bandHeight - 15;
     for (const line of visible) {
-      drawText(r, line, PDF_A4_WIDTH / 2, y, 8.5, hexToRgb(content.footerForeground), "center");
-      y -= 11;
+      drawText(r, line, PDF_A4_WIDTH / 2, y, 9, hexToRgb(content.footerForeground), "center");
+      y -= 12;
     }
   }
 }
@@ -782,15 +832,9 @@ function renderFooterBand(r: Renderer, content: PdfContent): void {
 function renderPageNumbers(r: Renderer): void {
   const total = toPersianDigits(r.pages.length);
   r.pages.forEach((page, index) => {
-    const label = toVisualPersianText(`صفحه ${toPersianDigits(index + 1)} از ${total}`);
-    const width = r.font.widthOfTextAtSize(label, 8);
-    page.drawText(label, {
-      x: PDF_A4_WIDTH / 2 - width / 2,
-      y: 16,
-      size: 8,
-      font: r.font,
-      color: FAINT,
-    });
+    const label = `صفحه ${toPersianDigits(index + 1)} از ${total}`;
+    const pageRenderer: Renderer = { ...r, page };
+    drawText(pageRenderer, label, PDF_A4_WIDTH / 2, 16, 8, FAINT, "center");
   });
 }
 
@@ -831,6 +875,9 @@ export async function generateInvoicePdf(
   renderHeader(r, content, Boolean(assets.logo));
 
   // Logo (embedded after the header band so it paints above it).
+  // Near-white logos skip the white backing rectangle, which would otherwise
+  // read as the logo itself (or as a bare white square when the bytes are a
+  // white/blank placeholder).
   if (assets.logo) {
     const embedded = await embedAssetPng(doc, assets.logo);
     if (embedded) {
@@ -840,13 +887,15 @@ export async function generateInvoicePdf(
       const dw = iw * scale;
       const dh = ih * scale;
       const bandBottom = PDF_A4_HEIGHT - 86;
-      r.pages[0]?.drawRectangle({
-        x: CONTENT_RIGHT - size,
-        y: bandBottom + (86 - size) / 2,
-        width: size,
-        height: size,
-        color: WHITE,
-      });
+      if (await logoNeedsWhiteBacking(assets.logo)) {
+        r.pages[0]?.drawRectangle({
+          x: CONTENT_RIGHT - size,
+          y: bandBottom + (86 - size) / 2,
+          width: size,
+          height: size,
+          color: WHITE,
+        });
+      }
       r.pages[0]?.drawImage(embedded.image, {
         x: CONTENT_RIGHT - size + (size - dw) / 2,
         y: bandBottom + (86 - dh) / 2,
@@ -881,8 +930,10 @@ export async function generateInvoicePdf(
   renderFooterBand(lastRenderer, content);
   renderPageNumbers(r);
 
+  // Drafts have no official number; the title carries no identifier at all —
+  // database ids and DRAFT placeholders must never leak into the document.
   const title = content.isDraft
-    ? `پیش‌نویس فاکتور ${model.invoice.id.slice(0, 8)}`
+    ? "پیش‌نویس فاکتور"
     : `فاکتور ${model.officialNumber ?? model.invoice.invoiceNumber}`;
   doc.setTitle(title);
   doc.setAuthor(content.businessName);

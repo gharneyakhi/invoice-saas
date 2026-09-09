@@ -1,7 +1,7 @@
 import type { InvoicePreviewModel } from "@/lib/invoice-preview-model";
 import { buildPdfContent, type PdfContent } from "./pdfService";
 import { DRAFT_EXPORT_NOTICE } from "./exportCopy";
-import { fetchImageAsPng, pngToDataUri } from "./imageAssets";
+import { fetchImageAsPng, logoNeedsWhiteBacking, pngToDataUri } from "./imageAssets";
 import { getVazirmatnFontBase64 } from "./fontLoader";
 
 /**
@@ -69,6 +69,8 @@ export interface ImageAssets {
   logo: string | null;
   sellerStamp: string | null;
   sellerSignature: string | null;
+  /** False when the logo is near-white and must skip the white backing rect. */
+  logoNeedsBacking?: boolean;
 }
 
 async function resolveImageAssets(
@@ -92,6 +94,7 @@ async function resolveImageAssets(
     logo: logo ? pngToDataUri(logo) : null,
     sellerStamp: sellerStamp ? pngToDataUri(sellerStamp) : null,
     sellerSignature: sellerSignature ? pngToDataUri(sellerSignature) : null,
+    logoNeedsBacking: logo ? await logoNeedsWhiteBacking(logo) : true,
   };
 }
 
@@ -192,8 +195,12 @@ export function buildInvoiceSvg(
     text(c, firstSloganLine ?? "", textRight, 92, 14, fg);
   }
   if (assets.logo) {
+    if (assets.logoNeedsBacking !== false) {
+      c.parts.push(
+        `<rect x="${CONTENT_RIGHT - logoSize}" y="${(headerHeight - logoSize) / 2}" width="${logoSize}" height="${logoSize}" rx="10" fill="#ffffff"/>`,
+      );
+    }
     c.parts.push(
-      `<rect x="${CONTENT_RIGHT - logoSize}" y="${(headerHeight - logoSize) / 2}" width="${logoSize}" height="${logoSize}" rx="10" fill="#ffffff"/>`,
       `<image href="${assets.logo}" x="${CONTENT_RIGHT - logoSize + 6}" y="${(headerHeight - logoSize) / 2 + 6}" width="${logoSize - 12}" height="${logoSize - 12}" preserveAspectRatio="xMidYMid meet"/>`,
     );
   }

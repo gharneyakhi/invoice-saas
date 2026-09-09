@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PDFDict, PDFDocument, PDFName } from "pdf-lib";
+import { PDFDict, PDFDocument, PDFName, PDFRawStream } from "pdf-lib";
 import type { InvoicePreviewModel } from "@/lib/invoice-preview-model";
 import { BRAND_COLOR_FALLBACK } from "@/lib/invoice-brand";
 import {
@@ -142,7 +142,21 @@ describe("generateInvoicePdf document contract", () => {
     const bytes = await generateInvoicePdf(draftPreviewModel(), { fetchImage: async () => null });
     const loaded = await PDFDocument.load(bytes);
     expect(loaded.getPageCount()).toBeGreaterThanOrEqual(1);
-    expect(loaded.getTitle()).toContain("پیش‌نویس");
+    // The draft title carries no identifier at all: database ids and
+    // DRAFT- placeholders must never leak into the document.
+    expect(loaded.getTitle()).toBe("پیش‌نویس فاکتور");
+    expect(loaded.getTitle()).not.toContain("inv-draft");
+    expect(loaded.getTitle()).not.toContain("DRAFT");
+    expect(loaded.getAuthor()).toBe("فروشگاه البرز (profile)");
+  });
+
+  it("titles finalized invoices with the official number only", async () => {
+    const bytes = await generateInvoicePdf(finalizedPreviewModel(), {
+      fetchImage: async () => null,
+    });
+    const loaded = await PDFDocument.load(bytes);
+    expect(loaded.getTitle()).toBe("فاکتور 1024");
+    expect(loaded.getTitle()).not.toContain("inv-1");
   });
 
   it("paginates long item tables across A4 pages", async () => {
@@ -183,5 +197,34 @@ describe("generateInvoicePdf document contract", () => {
     });
     const loaded = await PDFDocument.load(bytes);
     expect(loaded.getPageCount()).toBeGreaterThanOrEqual(1);
+  });
+
+  it("embeds fetched images as Image XObjects", async () => {
+    const bytes = await generateInvoicePdf(finalizedPreviewModel(), {
+      fetchImage: async () => TINY_PNG,
+    });
+    const loaded = await PDFDocument.load(bytes);
+    // Image XObjects are streams, not plain dicts — inspect both.
+    let imageXObjects = 0;
+    for (const [, obj] of loaded.context.enumerateIndirectObjects()) {
+      const dict = obj instanceof PDFDict ? obj : obj instanceof PDFRawStream ? obj.dict : null;
+      if (!dict) continue;
+      try {
+        if (dict.get(PDFName.of("Subtype")) === PDFName.of("Image")) imageXObjects += 1;
+      } catch {
+        // Non-dict entries are skipped — only image dicts matter here.
+      }
+    }
+    // Logo + signature (the stamp is null in the fixture); the RGBA
+    // fixture embeds as image + soft-mask each.
+    expect(imageXObjects).toBe(4);
+  });
+
+  it("stacks over-long official numbers instead of colliding columns", async () => {
+    const model = finalizedPreviewModel({ officialNumber: "123456789012345678901234567890" });
+    const bytes = await generateInvoicePdf(model, { fetchImage: async () => null });
+    const loaded = await PDFDocument.load(bytes);
+    expect(loaded.getPageCount()).toBeGreaterThanOrEqual(1);
+    expect(loaded.getTitle()).toBe("فاکتور 123456789012345678901234567890");
   });
 });

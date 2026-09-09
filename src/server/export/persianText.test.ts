@@ -1,20 +1,57 @@
 import { describe, expect, it } from "vitest";
-import { containsRtl, toVisualPersianText } from "./persianText";
+import { containsRtl, shapePersianLine, type PdfTextFragment } from "./persianText";
 
 /**
- * Persian shaping + bidi reordering for server-side PDF text.
+ * Fragment segmentation for server-side PDF text.
  *
- * These tests pin exact presentation-form code points (not just "looks
- * right"), because `pdf-lib` draws whatever code points it receives with no
- * further shaping — a wrong form here is a visibly broken glyph in the PDF.
+ * `shapePersianLine` converts one logical line into visual-order fragments;
+ * the renderer draws each fragment with its own `drawText` call. These tests
+ * pin the EXACT fragments (text + direction) because each direction carries
+ * a fontkit contract:
+ *
+ *   - `rtl`:     drawn logical; fontkit reverses + GSUB-shapes it. MUST
+ *                contain an Arabic-script char (the RTL trigger) and MUST
+ *                NOT contain Latin letters or digits.
+ *   - `ltr`:     drawn as-is; fontkit's LTR path. MUST NOT contain any
+ *                Arabic-script char.
+ *   - `ltr-rev`: drawn PRE-REVERSED; fontkit's RTL path reverses it back.
+ *                MUST contain an Arabic-script char and MUST NOT contain
+ *                Latin letters.
+ *
+ * The pinned outputs below were verified against Pango-rendered ground truth
+ * (see the Export & Sharing V1 hardening notes): concatenating the fragments
+ * as fontkit renders them (`rtl`/`ltr-rev` reversed, `ltr` as-is) reproduces
+ * the reference display for every string.
  */
 
-function codePoints(text: string): string[] {
-  const out: string[] = [];
-  for (const char of text) {
-    out.push((char.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0"));
-  }
-  return out;
+function shapes(input: string): Array<[PdfTextFragment["direction"], string]> {
+  return shapePersianLine(input).map((fragment) => [fragment.direction, fragment.text]);
+}
+
+function isArabicScript(char: string): boolean {
+  const cp = char.codePointAt(0) ?? 0;
+  return (
+    (cp >= 0x0600 && cp <= 0x06ff) ||
+    (cp >= 0x0750 && cp <= 0x077f) ||
+    (cp >= 0x0870 && cp <= 0x089f) ||
+    (cp >= 0x08a0 && cp <= 0x08ff) ||
+    (cp >= 0xfb50 && cp <= 0xfdff) ||
+    (cp >= 0xfe70 && cp <= 0xfeff)
+  );
+}
+
+function isLatinLetter(char: string): boolean {
+  const cp = char.codePointAt(0) ?? 0;
+  return (cp >= 0x41 && cp <= 0x5a) || (cp >= 0x61 && cp <= 0x7a);
+}
+
+function isDigit(char: string): boolean {
+  const cp = char.codePointAt(0) ?? 0;
+  return (
+    (cp >= 0x30 && cp <= 0x39) ||
+    (cp >= 0x0660 && cp <= 0x0669) ||
+    (cp >= 0x06f0 && cp <= 0x06f9)
+  );
 }
 
 describe("containsRtl", () => {
@@ -32,108 +69,254 @@ describe("containsRtl", () => {
   });
 });
 
-describe("toVisualPersianText", () => {
-  it("returns pure LTR input unchanged", () => {
-    expect(toVisualPersianText("INV-101")).toBe("INV-101");
-    expect(toVisualPersianText("12345")).toBe("12345");
-    expect(toVisualPersianText("۱۲۳")).toBe("۱۲۳");
-    expect(toVisualPersianText("IR1234567890")).toBe("IR1234567890");
-    expect(toVisualPersianText("")).toBe("");
+describe("shapePersianLine", () => {
+  it("returns pure LTR input as a single as-is fragment", () => {
+    expect(shapes("INV-101")).toEqual([["ltr", "INV-101"]]);
+    expect(shapes("12345")).toEqual([["ltr", "12345"]]);
+    expect(shapes("IR1234567890")).toEqual([["ltr", "IR1234567890"]]);
+    expect(shapes("+98 912 345 6789")).toEqual([["ltr", "+98 912 345 6789"]]);
+    expect(shapes("")).toEqual([]);
   });
 
-  it("shapes سلام with a final lam-alef ligature", () => {
-    // Logical: س ل ا م → س-initial, لا-final-ligature, م-isolated, reversed.
-    expect(codePoints(toVisualPersianText("سلام"))).toEqual([
-      "FEE1", // م isolated
-      "FEFC", // لا final ligature
-      "FEB3", // س initial
+  it("keeps RTL text logical (the font's GSUB shaper shapes it)", () => {
+    // No presentation forms: lam-alef ligatures, contextual forms and mark
+    // positioning are the embedded font's job once fontkit reverses the run.
+    expect(shapes("سلام")).toEqual([["rtl", "سلام"]]);
+    expect(shapes("فاکتور")).toEqual([["rtl", "فاکتور"]]);
+    expect(shapes("پ چ ژ ک گ ی")).toEqual([
+      ["rtl", "ی"],
+      ["rtl", "گ "],
+      ["rtl", "ک "],
+      ["rtl", "ژ "],
+      ["rtl", "چ "],
+      ["rtl", "پ "],
     ]);
-  });
-
-  it("shapes فاکتور with correct contextual forms", () => {
-    // ف-initial ا-final ک-initial ت-medial و-final ر-isolated, reversed.
-    expect(codePoints(toVisualPersianText("فاکتور"))).toEqual([
-      "FEAD", // ر isolated
-      "FEEE", // و final
-      "FE98", // ت medial
-      "FB90", // ک initial
-      "FE8E", // ا final
-      "FED3", // ف initial
-    ]);
-  });
-
-  it("shapes Persian-specific letters (پ چ ژ ک گ ی)", () => {
-    expect(codePoints(toVisualPersianText("پ"))).toEqual(["FB56"]);
-    expect(codePoints(toVisualPersianText("چ"))).toEqual(["FB7A"]);
-    expect(codePoints(toVisualPersianText("ژ"))).toEqual(["FB8A"]);
-    expect(codePoints(toVisualPersianText("ک"))).toEqual(["FB8E"]);
-    expect(codePoints(toVisualPersianText("گ"))).toEqual(["FB92"]);
-    expect(codePoints(toVisualPersianText("ی"))).toEqual(["FBFC"]);
   });
 
   it("keeps Persian digit runs in reading order inside RTL text", () => {
-    // "فاکتور ۱۲۳" → digits first (left), then reversed shaped word.
-    const visual = toVisualPersianText("فاکتور ۱۲۳");
-    expect(visual.startsWith("۱۲۳ ")).toBe(true);
-    expect(codePoints(visual.slice("۱۲۳ ".length))).toEqual([
-      "FEAD",
-      "FEEE",
-      "FE98",
-      "FB90",
-      "FE8E",
-      "FED3",
+    expect(shapes("فاکتور ۱۲۳")).toEqual([
+      ["ltr-rev", "۳۲۱"],
+      ["ltr", " "],
+      ["rtl", "فاکتور"],
     ]);
   });
 
   it("keeps Latin tokens intact inside RTL text", () => {
-    // "شماره INV-101" → token left, word right; token never split.
-    const visual = toVisualPersianText("شماره INV-101");
-    expect(visual.startsWith("INV-101 ")).toBe(true);
-    expect(visual).toContain("INV-101");
+    expect(shapes("شماره INV-101")).toEqual([
+      ["ltr", "INV-101 "],
+      ["rtl", "شماره"],
+    ]);
   });
 
   it("keeps email addresses intact inside RTL text", () => {
-    const visual = toVisualPersianText("ایمیل test@mail.com");
-    expect(visual.startsWith("test@mail.com ")).toBe(true);
-  });
-
-  it("breaks joining at ZWNJ (می‌شود)", () => {
-    // م-initial ی-final | ش-initial و-final د-isolated, reversed.
-    expect(codePoints(toVisualPersianText("می‌شود"))).toEqual([
-      "FEA9", // د isolated
-      "FEEE", // و final
-      "FEB7", // ش initial
-      "FBFD", // ی final (FARSI YEH)
-      "FEE3", // م initial
+    expect(shapes("ایمیل test@mail.com")).toEqual([
+      ["ltr", "test@mail.com "],
+      ["rtl", "ایمیل"],
+    ]);
+    expect(shapes("ایمیل: test@mail.com")).toEqual([
+      ["ltr", "test@mail.com :"],
+      ["rtl", "ایمیل"],
     ]);
   });
 
-  it("mirrors brackets around RTL text", () => {
-    // Logical "(تومان)" displays as "(ناموت)" left-to-right.
-    const visual = toVisualPersianText("(تومان)");
-    expect(visual.startsWith("(")).toBe(true);
-    expect(visual.endsWith(")")).toBe(true);
+  it("keeps ZWNJ inside the RTL run (می‌شود) for the shaper", () => {
+    expect(shapes("می‌شود")).toEqual([["rtl", "می‌شود"]]);
+    expect(shapes("پیش‌نویس")).toEqual([["rtl", "پیش‌نویس"]]);
   });
 
-  it("places the percent sign on the left of Persian percent values", () => {
-    // Logical "۹٪" → visual "٪۹".
-    expect(toVisualPersianText("۹٪")).toBe("٪۹");
+  it("pre-mirrors brackets around RTL text", () => {
+    // Logical `(تومان)` is drawn `)تومان(` so fontkit's reversal shows
+    // `(تومان)`; fontkit reverses but never mirrors.
+    expect(shapes("(تومان)")).toEqual([["rtl", ")تومان("]]);
   });
 
-  it("handles a realistic mixed label", () => {
-    // "تخفیف (۹٪)" → "(٪۹ )" + shaped "تخفیف".
-    const visual = toVisualPersianText("تخفیف (۹٪)");
-    expect(visual.startsWith("(٪۹ )")).toBe(true);
-  });
-
-  it("does not join across spaces", () => {
-    // "با ما": ب-initial ا-final | م-initial ا-final, words reversed.
-    expect(codePoints(toVisualPersianText("با ما"))).toEqual([
-      "FE8E", // ا final
-      "FEE3", // م initial
-      "0020", // space
-      "FE8E", // ا final
-      "FE91", // ب initial
+  it("keeps a Latin bracket pair an intact LTR unit", () => {
+    expect(shapes("(snapshot)")).toEqual([["ltr", "(snapshot)"]]);
+    expect(shapes("فروشگاه البرز (snapshot)")).toEqual([
+      ["ltr", "(snapshot) "],
+      ["rtl", "البرز"],
+      ["rtl", "فروشگاه "],
     ]);
+  });
+
+  it("pre-reverses Persian percent values so the render restores them", () => {
+    // Logical `۹٪` would trigger fontkit's RTL path and come back `٪۹`,
+    // so it is drawn pre-reversed.
+    expect(shapes("۹٪")).toEqual([["ltr-rev", "٪۹"]]);
+    expect(shapes("(۹٪)")).toEqual([
+      ["ltr", "("],
+      ["ltr-rev", "٪۹"],
+      ["ltr", ")"],
+    ]);
+  });
+
+  it("reverses block order around number-only bracket pairs", () => {
+    // UBA N0: `(۱۰٪)` sits on the RTL side, so `۲۰,۰۰۰ (۱۰٪)` displays as
+    // `(۱۰٪) ۲۰,۰۰۰` (verified against Pango ground truth).
+    expect(shapes("۲۰,۰۰۰ (۱۰٪)")).toEqual([
+      ["ltr", "("],
+      ["ltr-rev", "٪۰۱"],
+      ["ltr", ") "],
+      ["ltr-rev", "۰۲"],
+      ["ltr", ","],
+      ["ltr-rev", "۰۰۰"],
+    ]);
+  });
+
+  it("handles realistic mixed labels", () => {
+    expect(shapes("تخفیف (۹٪)")).toEqual([
+      ["ltr", "("],
+      ["ltr-rev", "٪۹"],
+      ["ltr", ")"],
+      ["rtl", "تخفیف "],
+    ]);
+    expect(shapes("تخفیف کلی (۵٪)")).toEqual([
+      ["ltr", "("],
+      ["ltr-rev", "٪۵"],
+      ["ltr", ")"],
+      ["rtl", "کلی "],
+      ["rtl", "تخفیف "],
+    ]);
+    expect(shapes("مالیات بر ارزش افزوده (۹٪)")).toEqual([
+      ["ltr", "("],
+      ["ltr-rev", "٪۹"],
+      ["ltr", ")"],
+      ["rtl", "افزوده "],
+      ["rtl", "ارزش "],
+      ["rtl", "بر "],
+      ["rtl", "مالیات "],
+    ]);
+    expect(shapes("اقلام فاکتور (تومان)")).toEqual([
+      ["rtl", "تومان("],
+      ["rtl", "فاکتور )"],
+      ["rtl", "اقلام "],
+    ]);
+  });
+
+  it("glues Arabic decimal/thousands separators to their digits", () => {
+    expect(shapes("۱،۲")).toEqual([["ltr-rev", "۲،۱"]]);
+    expect(shapes("۳٫۱۴")).toEqual([["ltr-rev", "۴۱٫۳"]]);
+  });
+
+  it("orders colon labels, dates and page numbers like the reference", () => {
+    expect(shapes("موبایل: 09120000001")).toEqual([
+      ["ltr", "09120000001 :"],
+      ["rtl", "موبایل"],
+    ]);
+    expect(shapes("شبا: IR111111111111111111111111")).toEqual([
+      ["ltr", "IR111111111111111111111111 :"],
+      ["rtl", "شبا"],
+    ]);
+    expect(shapes("کد ملی: 1010101010")).toEqual([
+      ["ltr", "1010101010 :"],
+      ["rtl", "ملی"],
+      ["rtl", "کد "],
+    ]);
+    expect(shapes("۱۴ اسفند ۱۴۰۴")).toEqual([
+      ["ltr-rev", "۴۰۴۱"],
+      ["ltr", " "],
+      ["rtl", " اسفند"],
+      ["ltr-rev", "۴۱"],
+    ]);
+    expect(shapes("۱۸۶,۳۹۰ تومان")).toEqual([
+      ["rtl", " تومان"],
+      ["ltr-rev", "۶۸۱"],
+      ["ltr", ","],
+      ["ltr-rev", "۰۹۳"],
+    ]);
+    expect(shapes("صفحه ۱ از ۲")).toEqual([
+      ["ltr-rev", "۲"],
+      ["ltr", " "],
+      ["rtl", " از"],
+      ["ltr-rev", "۱"],
+      ["ltr", " "],
+      ["rtl", "صفحه"],
+    ]);
+  });
+
+  it("keeps percent runs intact between Persian words", () => {
+    expect(shapes("تخفیف ۱۰٪ برای خرید نقدی")).toEqual([
+      ["rtl", "نقدی"],
+      ["rtl", "خرید "],
+      ["rtl", " برای "],
+      ["ltr-rev", "٪۰۱"],
+      ["ltr", " "],
+      ["rtl", "تخفیف"],
+    ]);
+  });
+
+  it("renders pure-number lines exactly like the Pango reference", () => {
+    // Simulate fontkit: `ltr-rev` fragments are reversed by the RTL path,
+    // `ltr` fragments pass through. (RTL-letter lines are covered by the
+    // fragment pins above; their reversal is fontkit's well-tested path.)
+    const render = (input: string): string =>
+      shapePersianLine(input)
+        .map((fragment) =>
+          fragment.direction === "ltr"
+            ? fragment.text
+            : [...fragment.text].reverse().join(""),
+        )
+        .join("");
+    expect(render("۲۰,۰۰۰ (۱۰٪)")).toBe("(۱۰٪) ۲۰,۰۰۰");
+    expect(render("(۹٪)")).toBe("(۹٪)");
+    expect(render("۹٪")).toBe("۹٪");
+    expect(render("۱،۲")).toBe("۱،۲");
+    expect(render("۳٫۱۴")).toBe("۳٫۱۴");
+    expect(render("INV-101")).toBe("INV-101");
+  });
+
+  it("holds the fontkit contract invariants over an invoice corpus", () => {
+    const corpus = [
+      "۹٪",
+      "۲۰,۰۰۰ (۱۰٪)",
+      "تخفیف کلی (۵٪)",
+      "مالیات بر ارزش افزوده (۹٪)",
+      "موبایل: 09120000001",
+      "ایمیل: test@mail.com",
+      "شبا: IR111111111111111111111111",
+      "۱۴ اسفند ۱۴۰۴",
+      "۱۸۶,۳۹۰ تومان",
+      "(تومان)",
+      "فروشگاه البرز (snapshot)",
+      "پیش‌نویس",
+      "۱،۲",
+      "۳٫۱۴",
+      "صفحه ۱ از ۲",
+      "تخفیف ۱۰٪ برای خرید نقدی",
+      "شماره INV-101",
+      "ایمیل test@mail.com",
+      "(۹٪)",
+      "(snapshot)",
+      "کد ملی: 1010101010",
+      "اقلام فاکتور (تومان)",
+      "پانوشت snapshot",
+      "بِسْمِ اللَّهِ",
+      "«سلام»",
+      "می‌شود",
+      "INV-101",
+      "09120000002",
+      "خدمات طراحی وب",
+      "با ما",
+    ];
+    for (const input of corpus) {
+      const fragments = shapePersianLine(input);
+      // Never drop or invent characters.
+      const produced = fragments.reduce((sum, fragment) => sum + [...fragment.text].length, 0);
+      expect(produced).toBe([...input].length);
+      for (const fragment of fragments) {
+        expect(fragment.text).not.toBe("");
+        const chars = [...fragment.text];
+        if (fragment.direction === "rtl") {
+          expect(chars.some(isArabicScript)).toBe(true);
+          expect(chars.some(isLatinLetter)).toBe(false);
+          expect(chars.some(isDigit)).toBe(false);
+        } else if (fragment.direction === "ltr") {
+          expect(chars.some(isArabicScript)).toBe(false);
+        } else {
+          expect(chars.some(isArabicScript)).toBe(true);
+          expect(chars.some(isLatinLetter)).toBe(false);
+        }
+      }
+    }
   });
 });

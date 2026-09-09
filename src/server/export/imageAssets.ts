@@ -16,7 +16,11 @@ const EXPORT_IMAGE_FETCH_TIMEOUT_MS = 10_000;
 
 /**
  * Fetches a remote image and normalizes it to PNG bytes.
- * Returns `null` on any failure (network, timeout, oversize, decode).
+ * Returns `null` on any failure (network, timeout, oversize, decode) and
+ * for BLANK payloads: zero-size, ≤2px placeholder/tracker dots, or fully
+ * transparent images (all of which would otherwise render as a bare white
+ * backing rectangle in the PDF header). Blank detection fails OPEN: if the
+ * pixel probe itself errors, the normalized bytes are kept.
  */
 export async function fetchImageAsPng(url: string): Promise<Buffer | null> {
   const controller = new AbortController();
@@ -31,11 +35,53 @@ export async function fetchImageAsPng(url: string): Promise<Buffer | null> {
     // `sharp` is imported lazily so unit tests that stub image fetching
     // never pay for the native module.
     const { default: sharp } = await import("sharp");
-    return await sharp(Buffer.from(arrayBuffer)).png().toBuffer();
+    const normalized = await sharp(Buffer.from(arrayBuffer)).png().toBuffer();
+    try {
+      const probe = sharp(normalized);
+      const meta = await probe.metadata();
+      if ((meta.width ?? 0) <= 2 || (meta.height ?? 0) <= 2) return null;
+      if (meta.hasAlpha) {
+        const stats = await probe.stats();
+        const alpha = stats.channels[stats.channels.length - 1];
+        if (alpha && alpha.max === 0) return null;
+      }
+    } catch {
+      // Fail open: keep the image when the blank probe cannot run.
+    }
+    return normalized;
   } catch {
     return null;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * True when a logo needs the opaque white rectangle behind it in the PDF /
+ * image header. Near-white logos (mean opaque-pixel brightness ≥235/255)
+ * skip the backing: the rectangle would be indistinguishable from — or
+ * wrongly read as — the logo itself. Fails CLOSED (returns true) when the
+ * probe cannot run, preserving the historical behavior.
+ */
+export async function logoNeedsWhiteBacking(png: Buffer): Promise<boolean> {
+  try {
+    const { default: sharp } = await import("sharp");
+    const { data, info } = await sharp(png)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    if (info.channels < 4 || data.length === 0) return true;
+    let sum = 0;
+    let count = 0;
+    for (let i = 0; i + 3 < data.length; i += info.channels) {
+      if ((data[i + 3] as number) < 128) continue; // transparent pixel
+      sum += (data[i] as number) + (data[i + 1] as number) + (data[i + 2] as number);
+      count += 1;
+    }
+    if (count === 0) return false;
+    return sum / (3 * count) < 235;
+  } catch {
+    return true;
   }
 }
 

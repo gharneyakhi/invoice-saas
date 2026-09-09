@@ -153,4 +153,38 @@ describe("generateInvoiceExcel workbook contract", () => {
     });
     expect(found).toBe(true);
   });
+
+  it("is print-ready (A4 portrait, fit to page width)", async () => {
+    const ws = await loadWorkbook(await generateInvoiceExcel(finalizedPreviewModel()));
+    expect(ws.pageSetup?.paperSize).toBe(9);
+    expect(ws.pageSetup?.orientation).toBe("portrait");
+    expect(ws.pageSetup?.fitToPage).toBe(true);
+    expect(ws.pageSetup?.fitToWidth).toBe(1);
+  });
+
+  it("dividers the grand-total rows like the PDF", async () => {
+    const ws = await loadWorkbook(await generateInvoiceExcel(finalizedPreviewModel()));
+    const grand = findRowByLabel(ws, "مبلغ نهایی فاکتور").getCell(2);
+    expect(grand.border?.top?.style).toBe("thin");
+    const remaining = findRowByLabel(ws, "مانده قابل پرداخت").getCell(2);
+    expect(remaining.border?.top?.style).toBe("thin");
+    const plain = findRowByLabel(ws, "جمع اقلام").getCell(2);
+    expect(plain.border?.top?.style).toBeUndefined();
+  });
+
+  it("leaks no internal ids or draft placeholders into any cell", async () => {
+    const forbidden = ["inv-1", "inv-draft", "DRAFT-xyz", "biz-1", "cust-1", "item-1", "file-"];
+    for (const model of [finalizedPreviewModel(), draftPreviewModel()]) {
+      const ws = await loadWorkbook(await generateInvoiceExcel(model));
+      ws.eachRow((row) => {
+        row.eachCell((cell) => {
+          if (typeof cell.value === "string") {
+            for (const needle of forbidden) {
+              expect(cell.value).not.toContain(needle);
+            }
+          }
+        });
+      });
+    }
+  });
 });

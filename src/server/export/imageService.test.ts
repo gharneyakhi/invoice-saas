@@ -73,6 +73,28 @@ describe("buildInvoiceSvg data law", () => {
     expect(svg).toContain(`<image href="${uri}"`);
   });
 
+  it("backs the logo with white unless the asset opts out", () => {
+    const uri = `data:image/png;base64,${TINY_PNG.toString("base64")}`;
+    const logoRect = 'width="76" height="76" rx="10" fill="#ffffff"';
+    const backed = buildInvoiceSvg(finalizedPreviewModel(), {
+      logo: uri,
+      sellerStamp: null,
+      sellerSignature: null,
+    });
+    expect(backed).toContain(logoRect);
+    expect(backed).toContain(`<image href="${uri}"`);
+
+    // Near-white logos skip the backing rect (it would read as the logo).
+    const unbacked = buildInvoiceSvg(finalizedPreviewModel(), {
+      logo: uri,
+      sellerStamp: null,
+      sellerSignature: null,
+      logoNeedsBacking: false,
+    });
+    expect(unbacked).not.toContain(logoRect);
+    expect(unbacked).toContain(`<image href="${uri}"`);
+  });
+
   it("is exactly A4 for single-page invoices and grows for long ones", () => {
     const minimal = finalizedPreviewModel({
       seller: {
