@@ -11,7 +11,8 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:seed": "tsx prisma/seed.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify:pdf-rtl": "GOOGLE_CLIENT_ID=dummy-verify-id GOOGLE_CLIENT_SECRET=dummy-verify-secret vite-node --config scripts/vite.verify.config.ts scripts/pdf-rtl-verify.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -21,7 +22,9 @@
     "@aws-sdk/client-s3": "^3.620.0",
     "@aws-sdk/s3-request-presigner": "^3.620.0",
     "@hookform/resolvers": "^3.9.0",
+    "@pdf-lib/fontkit": "^1.1.1",
     "@prisma/client": "^5.22.0",
+    "bidi-js": "^1.1.0",
     "clsx": "^2.1.1",
     "date-fns": "^3.6.0",
     "decimal.js": "^10.6.0",
@@ -48,6 +51,7 @@
     "tailwindcss": "^3.4.7",
     "tsx": "^4.16.5",
     "typescript": "^5.9.3",
+    "vite-node": "^2.1.9",
     "vitest": "^2.1.9"
   }
 }
