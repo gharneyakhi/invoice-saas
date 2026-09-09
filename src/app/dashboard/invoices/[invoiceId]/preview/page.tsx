@@ -9,6 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InvoicePreviewDocument } from "@/components/invoice/InvoicePreviewDocument";
 import { InvoicePrintButton } from "@/components/invoice/InvoicePrintButton";
+import { InvoicePdfButton } from "@/components/invoice/InvoicePdfButton";
 import { AlertCircleIcon, ChevronRightIcon, EyeIcon } from "@/components/icons";
 
 /**
