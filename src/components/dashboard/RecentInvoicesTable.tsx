@@ -28,6 +28,33 @@ export interface RecentInvoicesTableProps {
   className?: string;
 }
 
+/**
+ * Presentation-only identifier for a dashboard invoice row.
+ *
+ * Drafts store an internal `DRAFT-<uuid>` placeholder — never show it in the
+ * UI. Drafts render a clean «پیش‌نویس» label; finalized invoices keep their
+ * official number exactly (only Persian digits are applied for display).
+ * The underlying `invoiceNumber` value is never changed here.
+ */
+export function displayRecentInvoiceNumber(inv: DashboardRecentInvoiceDTO): string {
+  if (inv.status === "DRAFT" || /^DRAFT[:-]/.test(inv.invoiceNumber)) {
+    return "پیش‌نویس";
+  }
+  return inv.invoiceNumber ? toPersianDigits(inv.invoiceNumber) : "—";
+}
+
+/**
+ * Desktop invoice-number cell typography: ~13px medium so official numbers
+ * stay clearly readable, `whitespace-nowrap` so neither the number nor the
+ * draft label wraps.
+ */
+export const INVOICE_NUMBER_CELL_CLASS =
+  "py-3.5 px-5 font-medium text-gray-900 font-sans text-[13px] whitespace-nowrap";
+
+/** Mobile invoice-number typography: 14px semi-bold, no wrapping. */
+export const INVOICE_NUMBER_MOBILE_CLASS =
+  "font-semibold text-sm text-gray-900 font-sans whitespace-nowrap";
+
 export function RecentInvoicesTable({
   invoices,
   hasBusiness,
@@ -116,8 +143,8 @@ export function RecentInvoicesTable({
                         key={inv.id}
                         className="hover:bg-gray-50/80 transition-colors group"
                       >
-                        <td className="py-3.5 px-5 font-medium text-gray-900 font-sans">
-                          {inv.invoiceNumber ? toPersianDigits(inv.invoiceNumber) : "—"}
+                        <td className={INVOICE_NUMBER_CELL_CLASS}>
+                          {displayRecentInvoiceNumber(inv)}
                         </td>
                         <td className="py-3.5 px-4 text-gray-600">
                           {formatInvoiceType(inv.invoiceType)}
@@ -166,8 +193,8 @@ export function RecentInvoicesTable({
                   <div key={inv.id} className="p-4 space-y-3 bg-white">
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
-                        <span className="font-semibold text-sm text-gray-900 font-sans">
-                          {inv.invoiceNumber ? toPersianDigits(inv.invoiceNumber) : "پیش‌نویس"}
+                        <span className={INVOICE_NUMBER_MOBILE_CLASS}>
+                          {displayRecentInvoiceNumber(inv)}
                         </span>
                         <span className="text-[11px] text-gray-400">
                           ({formatInvoiceType(inv.invoiceType)})
