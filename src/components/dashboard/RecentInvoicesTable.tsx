@@ -9,7 +9,6 @@ import {
   formatPersianDateShort,
   formatInvoiceStatus,
   formatInvoiceType,
-  toPersianDigits,
 } from "@/lib/formatters";
 import {
   InvoicesIcon,
@@ -18,6 +17,7 @@ import {
   ChevronLeftIcon,
   FileTextIcon,
 } from "@/components/icons";
+import { formatInvoiceIdentifierDisplay } from "@/lib/invoice-identifier-display";
 import type { DashboardRecentInvoiceDTO } from "@/server/dashboard/dashboardService";
 
 export interface RecentInvoicesTableProps {
@@ -27,6 +27,30 @@ export interface RecentInvoicesTableProps {
   fallbackCurrency?: string;
   className?: string;
 }
+
+/**
+ * Identifier shown in the «شماره فاکتور» column. Drafts render the clean
+ * «پیش‌نویس» label (never the internal `DRAFT-<uuid>` placeholder); finalized
+ * invoices keep their official number. See `@/lib/invoice-identifier-display`.
+ */
+function displayRecentInvoiceNumber(inv: DashboardRecentInvoiceDTO): string {
+  return formatInvoiceIdentifierDisplay(inv.status, inv.invoiceNumber);
+}
+
+/**
+ * Desktop invoice-number cell typography: ~13px medium so official numbers
+ * stay clearly readable, `whitespace-nowrap` so neither the number nor the
+ * draft label wraps.
+ */
+export const INVOICE_NUMBER_CELL_CLASS =
+  "py-3.5 px-5 font-medium text-gray-900 font-sans text-[13px] whitespace-nowrap";
+
+/** Desktop customer cell: 13px medium, real name (truncated when very long). */
+export const CUSTOMER_CELL_CLASS = "py-3.5 px-4 font-medium text-gray-900 font-sans";
+
+/** Mobile invoice-number typography: 14px semi-bold, no wrapping. */
+export const INVOICE_NUMBER_MOBILE_CLASS =
+  "font-semibold text-sm text-gray-900 font-sans whitespace-nowrap";
 
 export function RecentInvoicesTable({
   invoices,
@@ -95,14 +119,15 @@ export function RecentInvoicesTable({
           <>
             {/* Desktop Table View */}
             <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-right text-xs">
+              <table className="w-full text-right text-[13px]">
                 <thead className="border-y border-gray-100 bg-gray-50/75 text-gray-500">
                   <tr>
                     <th scope="col" className="py-3 px-5 font-semibold">شماره فاکتور</th>
+                    <th scope="col" className="py-3 px-4 font-semibold">مشتری</th>
                     <th scope="col" className="py-3 px-4 font-semibold">نوع</th>
-                    <th scope="col" className="py-3 px-4 font-semibold">وضعیت</th>
                     <th scope="col" className="py-3 px-4 font-semibold">تاریخ صدور</th>
                     <th scope="col" className="py-3 px-4 font-semibold">سررسید</th>
+                    <th scope="col" className="py-3 px-4 font-semibold">وضعیت</th>
                     <th scope="col" className="py-3 px-4 font-semibold">مبلغ کل</th>
                     <th scope="col" className="py-3 px-4 font-semibold">مانده</th>
                     <th scope="col" className="py-3 px-5 text-left font-semibold">عملیات</th>
@@ -116,16 +141,19 @@ export function RecentInvoicesTable({
                         key={inv.id}
                         className="hover:bg-gray-50/80 transition-colors group"
                       >
-                        <td className="py-3.5 px-5 font-medium text-gray-900 font-sans">
-                          {inv.invoiceNumber ? toPersianDigits(inv.invoiceNumber) : "—"}
+                        <td className={INVOICE_NUMBER_CELL_CLASS}>
+                          {displayRecentInvoiceNumber(inv)}
+                        </td>
+                        <td className={CUSTOMER_CELL_CLASS}>
+                          <span
+                            className="block max-w-[16rem] truncate"
+                            title={inv.customerName ?? undefined}
+                          >
+                            {inv.customerName ?? "—"}
+                          </span>
                         </td>
                         <td className="py-3.5 px-4 text-gray-600">
                           {formatInvoiceType(inv.invoiceType)}
-                        </td>
-                        <td className="py-3.5 px-4">
-                          <Badge variant={statusMeta.variant} showDot>
-                            {statusMeta.label}
-                          </Badge>
                         </td>
                         <td className="py-3.5 px-4 text-gray-600 font-sans">
                           {formatPersianDateShort(inv.issueDate)}
@@ -133,10 +161,15 @@ export function RecentInvoicesTable({
                         <td className="py-3.5 px-4 text-gray-500 font-sans">
                           {inv.dueDate ? formatPersianDateShort(inv.dueDate) : "—"}
                         </td>
-                        <td className="py-3.5 px-4 font-semibold text-gray-900 font-sans">
+                        <td className="py-3.5 px-4">
+                          <Badge variant={statusMeta.variant} showDot>
+                            {statusMeta.label}
+                          </Badge>
+                        </td>
+                        <td className="py-3.5 px-4 font-semibold text-gray-900 font-sans whitespace-nowrap">
                           {formatCurrency(inv.total, currencyOf(inv))}
                         </td>
-                        <td className="py-3.5 px-4 text-gray-600 font-sans">
+                        <td className="py-3.5 px-4 font-medium text-gray-700 font-sans whitespace-nowrap">
                           {formatCurrency(inv.remainingAmount, currencyOf(inv))}
                         </td>
                         <td className="py-3.5 px-5 text-left">
@@ -166,8 +199,8 @@ export function RecentInvoicesTable({
                   <div key={inv.id} className="p-4 space-y-3 bg-white">
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
-                        <span className="font-semibold text-sm text-gray-900 font-sans">
-                          {inv.invoiceNumber ? toPersianDigits(inv.invoiceNumber) : "پیش‌نویس"}
+                        <span className={INVOICE_NUMBER_MOBILE_CLASS}>
+                          {displayRecentInvoiceNumber(inv)}
                         </span>
                         <span className="text-[11px] text-gray-400">
                           ({formatInvoiceType(inv.invoiceType)})
@@ -176,6 +209,16 @@ export function RecentInvoicesTable({
                       <Badge variant={statusMeta.variant} showDot>
                         {statusMeta.label}
                       </Badge>
+                    </div>
+
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="text-gray-400 text-[11px] shrink-0">مشتری:</span>
+                      <span
+                        className="font-medium text-gray-900 min-w-0 truncate"
+                        title={inv.customerName ?? undefined}
+                      >
+                        {inv.customerName ?? "—"}
+                      </span>
                     </div>
 
                     <div className="grid grid-cols-2 gap-2 text-xs pt-1">

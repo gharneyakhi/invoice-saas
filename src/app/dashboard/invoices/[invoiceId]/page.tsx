@@ -37,8 +37,8 @@ import {
   formatInvoiceType,
   formatPersianDate,
   formatPersianNumber,
-  toPersianDigits,
 } from "@/lib/formatters";
+import { formatInvoiceIdentifierDisplay } from "@/lib/invoice-identifier-display";
 
 /**
  * Read-only invoice detail view — the «مشاهده» destination of the invoice list.
@@ -243,7 +243,7 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
   return (
     <div className="space-y-6">
       <PageHeader
-        title={`فاکتور ${toPersianDigits(invoice.invoiceNumber)}`}
+        title={`فاکتور ${formatInvoiceIdentifierDisplay(invoice.status, invoice.invoiceNumber)}`}
         description={`${formatInvoiceType(invoice.invoiceType)} — صادر شده در ${formatPersianDate(invoice.issueDate)}`}
         badge={
           <Badge variant={statusMeta.variant} showDot>
@@ -284,7 +284,7 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
               {isCancelled ? (
                 <span> این فاکتور لغو شده است.</span>
               ) : (
-                <span> شماره رسمی: {toPersianDigits(invoice.invoiceNumber)}</span>
+                <span> شماره رسمی: {formatInvoiceIdentifierDisplay(invoice.status, invoice.invoiceNumber)}</span>
               )}
             </p>
           </div>
@@ -301,7 +301,7 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
             <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-3">
               <Field
                 label={isFinalized ? "شماره فاکتور رسمی" : "شماره فاکتور"}
-                value={toPersianDigits(invoice.invoiceNumber)}
+                value={formatInvoiceIdentifierDisplay(invoice.status, invoice.invoiceNumber)}
               />
               <Field label="نوع" value={formatInvoiceType(invoice.invoiceType)} />
               <Field label="وضعیت" value={isDraft ? "پیش‌نویس" : statusMeta.label} />

@@ -75,6 +75,8 @@ export interface DashboardRecentInvoiceDTO {
   invoiceNumber: string;
   invoiceType: "PROFORMA" | "FINAL";
   status: DashboardInvoiceStatus;
+  /** Current customer name (live relation, same source as the invoice list). */
+  customerName: string | null;
   total: string;
   paidAmount: string;
   remainingAmount: string;
@@ -155,6 +157,7 @@ interface RecentInvoiceRow {
   invoiceNumber: string;
   invoiceType: "PROFORMA" | "FINAL";
   status: DashboardInvoiceStatus;
+  customer: { name: string } | null;
   total: { toString(): string };
   paidAmount: { toString(): string };
   remainingAmount: { toString(): string };
@@ -171,6 +174,7 @@ function toRecentInvoiceDTO(row: RecentInvoiceRow): DashboardRecentInvoiceDTO {
     invoiceNumber: row.invoiceNumber,
     invoiceType: row.invoiceType,
     status: row.status,
+    customerName: row.customer?.name ?? null,
     total: moneyToFixed(row.total),
     paidAmount: moneyToFixed(row.paidAmount),
     remainingAmount: moneyToFixed(row.remainingAmount),
@@ -262,6 +266,9 @@ export async function getDashboardData(options: DashboardOptions = {}): Promise<
         invoiceNumber: true,
         invoiceType: true,
         status: true,
+        // Live customer name only (same narrow relation as the invoice list);
+        // no customer row is loaded into the dashboard payload.
+        customer: { select: { name: true } },
         total: true,
         paidAmount: true,
         remainingAmount: true,

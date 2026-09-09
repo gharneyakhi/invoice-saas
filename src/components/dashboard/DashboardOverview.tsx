@@ -108,8 +108,9 @@ export function DashboardOverview({ data }: DashboardOverviewProps) {
 
       {/* Main Grid: Recent Invoices (Left/Wide) + Usage & Quota Card (Right/Sidebar) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Recent Invoices Table (7 cols on lg) */}
-        <div className="lg:col-span-8 order-2 lg:order-1">
+        {/* Recent Invoices Table (9 cols on lg — wider than before, using the
+            empty space; only this section changes.) */}
+        <div className="lg:col-span-9 min-w-0 order-2 lg:order-1">
           <RecentInvoicesTable
             invoices={recentInvoices}
             hasBusiness={Boolean(currentBusiness)}
@@ -117,8 +118,8 @@ export function DashboardOverview({ data }: DashboardOverviewProps) {
           />
         </div>
 
-        {/* Plan / Quota Detail Card (5 cols on lg) */}
-        <div className="lg:col-span-4 order-1 lg:order-2 space-y-4">
+        {/* Plan / Quota Detail Card (3 cols on lg) */}
+        <div className="lg:col-span-3 min-w-0 order-1 lg:order-2 space-y-4">
           <UsageCard plan={plan} />
         </div>
       </div>
