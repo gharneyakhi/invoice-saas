@@ -125,10 +125,12 @@ These cannot be faked and are documented in `.env.example`:
 2. **S3-compatible bucket** (AWS S3, MinIO, Arvan Cloud, Liara, etc.) for
    logo/stamp/signature/generated-file storage.
 3. **A payment gateway account** (e.g. ZarinPal, IDPay, or similar for IRR)
-   — `src/server/payments/PaymentProvider.ts` (Phase 7) will define the
-   interface (`createPayment`, `verifyPayment`, `getPaymentStatus`,
-   `refundPayment`) so the provider is swappable without touching business
-   logic.
+   — `src/server/payments/PaymentProvider.ts` defines the interface
+   (`createPayment`, `verifyPayment`, `getPaymentStatus`, `refundPayment`) so
+   the provider is swappable without touching business logic. The ZarinPal v4
+   adapter, a sandbox provider and the production-safe factory are
+   implemented (section 9d); supplying a real `PAYMENT_MERCHANT_ID` is what
+   turns live payments on.
 4. **A real PostgreSQL instance** — `prisma generate`/`migrate` need
    network access to `binaries.prisma.sh` for engine binaries, which this
    sandbox's egress allowlist blocks; this will work normally in your own
@@ -608,6 +610,102 @@ open dialogs fed by one `getExportMetadata` Server Action.
   `buildPdfContent` relocation to `exportContent.ts`.
 * `npx tsc --noEmit` — identical error set to `main` (only the
   stub-`@prisma/client` errors, none from this milestone); `npx eslint .` clean.
+
+## 9d. Payment Provider Architecture — Step 1 (completed)
+
+Server-side gateway abstraction in `src/server/payments/`, so accepting online
+payments never hard-codes a vendor into business logic. This is the
+"payment-provider abstraction" item from the Phase 7 roadmap row; the
+subscription engine, webhooks and entitlement locking are **not** part of it.
+
+### Files created
+
+| File | Role |
+| --- | --- |
+| `PaymentProvider.ts` | The swappable interface: `createPayment`, `verifyPayment`, `getPaymentStatus`, `refundPayment` — exactly the four methods section 5 promised |
+| `types.ts` | Normalized, JSON-serializable DTOs + `PaymentProviderId` / `PaymentStatus` + the `capabilities` table |
+| `money.ts` | Decimal-safe amount/currency handling (ریال / تومان), reusing `@/lib/currency` |
+| `paymentErrors.ts` | Typed error family with stable machine `code`s — a leaf module, like `export/gmailErrors.ts` |
+| `http.ts` | HTTP dependency injection (`PaymentHttpClient` / `postJson`) with a timeout-wrapped `fetch` default |
+| `providers/zarinpal.ts` | ZarinPal **v4** adapter (`/pg/v4/payment/request.json`, `/verify.json`) |
+| `providers/sandbox.ts` | Deterministic in-memory simulator — no network, reserved `.invalid` redirect origin |
+| `factory.ts` | Resolves `PAYMENT_*` into a provider and enforces the production-safety rules |
+| `index.ts` | The public barrel |
+| `__tests__/*.test.ts` | 31 tests across money, errors, ZarinPal, sandbox and factory |
+
+`src/server/payment/` (singular) is the existing `InvoicePayment` CRUD domain
+layer; `src/server/payments/` (plural) is this gateway abstraction. The two
+layers are separate and neither imports the other — the gateway layer never
+touches an invoice row, so marking an invoice paid stays under the existing
+row-lock / overpayment / recalculation logic in `paymentService.ts`.
+
+### Money rules
+
+* No floating point anywhere in the boundary: amounts are `decimal.js` values
+  or canonical decimal **strings**. `1500`, `1500.0` and `1500.00` all
+  canonicalize to `"1500"`, so equality and idempotency checks are exact.
+* Both units are integral for payment purposes, but invoice totals carry 2
+  decimals (`Decimal(14, 2)`). `toProviderUnits()` therefore **refuses to
+  round silently** — it throws unless the caller passes an explicit
+  `rounding: "half-up"` policy.
+* Cross-currency comparison goes through `rialValue()`, so `500 IRT` compares
+  as `5000 IRR`. This is what makes the gateway-minimum check correct:
+  ZarinPal's documented 10000 ریال minimum is 1000 تومان.
+
+### Production-safe configuration
+
+`factory.ts` refuses, rather than degrades:
+
+1. An **unrecognized** `PAYMENT_PROVIDER` — a typo would otherwise silently
+   change which gateway takes the money. (Unset still means the documented
+   default, `zarinpal`.)
+2. A missing merchant id, or one that is not a 36-character UUID — which
+   catches pasting an API key into the merchant slot. The bad value is never
+   echoed into an error message.
+3. Live mode without a callback URL, or with an `http` one.
+4. **Sandbox enabled while `NODE_ENV=production`** — the guard that matters
+   most. A deployment that lost its `PAYMENT_SANDBOX=false` fails loudly at
+   the first payment instead of reporting success no gateway ever saw. The
+   `sandbox` provider is refused in production outright.
+5. A request callback URL on a different origin from `PAYMENT_CALLBACK_URL`,
+   so a caller cannot redirect payers (and their return traffic) elsewhere.
+
+### Honest capability reporting
+
+The v4 public gateway API has no read-only status endpoint and no refund
+endpoint, so the ZarinPal adapter declares
+`capabilities: { refund: false, statusQuery: false }` and those two methods
+throw `PaymentUnsupportedOperationError` rather than returning a fabricated
+result. Refunds happen in the ZarinPal merchant panel. The sandbox adapter
+implements both, so the full lifecycle is still exercisable locally.
+
+### Explicitly not in this step
+
+Subscription service, callback/webhook routes and signature verification,
+subscription UI, entitlement locking/restoration, and any wiring of online
+payment into the invoice flow. Nothing renders these DTOs yet; no invoice row
+is written by this layer.
+
+### Verification
+
+* **Tests:** `npx vitest run` → **74 files, 1241 tests, all passing**
+  (baseline on the base commit was 69 files / 1210 tests; **+31 new**, all in
+  `src/server/payments/__tests__/`).
+* **ESLint:** `npx next lint` → no warnings or errors.
+* **TypeScript:** `npx tsc --noEmit` → the same **3 pre-existing
+  `@prisma/client` stub errors** as the base branch (`prisma/seed.ts`,
+  `auth/bootstrap.ts`, `auth/requireBusinessOwnership.ts`), zero new ones.
+  Verified by running `tsc` in a throwaway worktree at the base commit, which
+  reproduces exactly those three.
+* **`next build`:** compiles (`✓ Compiled successfully`), then fails the
+  type-check stage on the same pre-existing `prisma/seed.ts` error — this
+  failure is **identical on the base commit** and is caused by the stubbed
+  `@prisma/client` (see section 5.4: `prisma generate` needs egress this
+  sandbox blocks). It is not introduced or affected by this step.
+* **No real payment API calls.** Every ZarinPal test injects its own stub
+  transport; the adapter has no other route to the network. The merchant id
+  in the tests is a fixture UUID, not a credential, and **no secrets were
+  added**.
 
 ## 10. Running locally (once you have the above)
 
