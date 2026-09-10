@@ -39,8 +39,24 @@ export function isCancelledInvoice(invoice: InvoiceLifecycleView): boolean {
   return invoice.status === "CANCELLED";
 }
 
+/** Domain rule surfaced to the UI: only finalized, un-cancelled invoices can be cancelled. */
+export function canCancelInvoice(invoice: InvoiceLifecycleView): boolean {
+  return isFinalizedInvoice(invoice) && !isCancelledInvoice(invoice);
+}
+
+/** Domain rule surfaced to the UI: only untouched DRAFT rows can be deleted. */
+export function canDeleteDraftInvoice(invoice: InvoiceLifecycleView): boolean {
+  return invoice.status === "DRAFT" && invoice.finalizedAt == null;
+}
+
 export const FINALIZATION_CONFIRMATION_MESSAGE =
   "پس از نهایی کردن، فاکتور قابل ویرایش نخواهد بود. آیا مطمئن هستید؟";
+
+export const CANCEL_CONFIRMATION_MESSAGE =
+  "آیا از لغو این فاکتور مطمئن هستید؟ پس از لغو، امکان ویرایش یا ثبت پرداخت جدید وجود نخواهد داشت.";
+
+export const DELETE_DRAFT_CONFIRMATION_MESSAGE =
+  "آیا از حذف این پیش‌نویس مطمئن هستید؟ این عملیات غیرقابل بازگشت است.";
 
 /**
  * Confirmation content for the editor's «صدور نهایی» dialog.
@@ -59,14 +75,40 @@ export const FINALIZATION_CONFIRMATION = {
   cancelLabel: "انصراف",
 } as const;
 
+export const CANCEL_CONFIRMATION = {
+  title: "لغو فاکتور رسمی",
+  message:
+    "آیا از لغو این فاکتور مطمئن هستید؟ وضعیت فاکتور به «لغو شده» تغییر می‌کند و امکان ثبت پرداخت یا تغییر اطلاعات آن وجود نخواهد داشت.",
+  warning: "شماره رسمی فاکتور و سوابق پرداخت‌های آن در سیستم محفوظ می‌ماند و سهمیه مصرف‌شده بازگردانده نمی‌شود.",
+  confirmLabel: "بله، فاکتور لغو شود",
+  cancelLabel: "انصراف",
+} as const;
+
+export const DELETE_DRAFT_CONFIRMATION = {
+  title: "حذف پیش‌نویس فاکتور",
+  message:
+    "آیا از حذف این پیش‌نویس مطمئن هستید؟ تمام اطلاعات و اقلام ثبت‌شده در این پیش‌نویس به‌طور کامل حذف خواهند شد.",
+  warning: "این عملیات غیرقابل بازگشت است و پیش‌نویس حذف‌شده قابل بازیابی نیست.",
+  confirmLabel: "حذف پیش‌نویس",
+  cancelLabel: "انصراف",
+} as const;
+
+export const DUPLICATE_CONFIRMATION = {
+  title: "ایجاد رونوشت (کپی فاکتور)",
+  message: "یک پیش‌نویس جدید بر اساس اقلام و اطلاعات این فاکتور ایجاد می‌شود.",
+  warning: "پیش‌نویس جدید شماره رسمی نخواهد داشت و سوابق پرداخت کپی نمی‌شوند.",
+  confirmLabel: "ایجاد پیش‌نویس جدید",
+  cancelLabel: "انصراف",
+} as const;
+
 const FALLBACK_MESSAGES: Record<ActionErrorCode, string> = {
-  UNAUTHORIZED: "برای نهایی کردن فاکتور باید وارد حساب کاربری شوید.",
-  FORBIDDEN: "شما به این فاکتور دسترسی ندارید.",
+  UNAUTHORIZED: "برای انجام این عملیات باید وارد حساب کاربری شوید.",
+  FORBIDDEN: "شما به این فاکتور یا قابلیت دسترسی ندارید.",
   NOT_FOUND: "فاکتور مورد نظر یافت نشد.",
-  VALIDATION_ERROR: "نهایی کردن این فاکتور ممکن نیست. لطفاً اطلاعات فاکتور را بررسی کنید.",
+  VALIDATION_ERROR: "انجام این عملیات برای این فاکتور امکان‌پذیر نیست.",
   INVOICE_LIMIT_REACHED: "سقف تعداد فاکتورهای نهایی‌شده در این ماه تکمیل شده است.",
   BUSINESS_LIMIT_REACHED: "سقف کسب‌وکارهای فعال تکمیل شده است.",
-  ENTITLEMENT_DATA_ERROR: "اطلاعات اشتراک برای نهایی کردن در دسترس نیست. کمی بعد تلاش کنید.",
+  ENTITLEMENT_DATA_ERROR: "اطلاعات اشتراک در دسترس نیست. لطفاً با پشتیبانی تماس بگیرید.",
   FILE_STORAGE_NOT_CONFIGURED: "سرویس ذخیره‌سازی فایل در دسترس نیست.",
   FILE_STORAGE_UPLOAD_FAILED: "ذخیره‌سازی فایل ناموفق بود؛ دوباره تلاش کنید.",
   GMAIL_NOT_CONNECTED: "حساب جیمیل متصل نیست. ابتدا جیمیل را متصل کنید.",
@@ -98,5 +140,56 @@ export function finalizationErrorMessage(error: ActionError): string {
     return FALLBACK_MESSAGES.VALIDATION_ERROR;
   }
 
+  return FALLBACK_MESSAGES[error.code] ?? FALLBACK_MESSAGES.INTERNAL_ERROR;
+}
+
+export function cancelErrorMessage(error: ActionError): string {
+  if (error.code === "VALIDATION_ERROR") {
+    const message = error.message.toLowerCase();
+    if (message.includes("already cancelled")) {
+      return "این فاکتور قبلاً لغو شده است.";
+    }
+    if (message.includes("draft")) {
+      return "فاکتورهای پیش‌نویس قابل لغو نیستند؛ می‌توانید آن‌ها را حذف کنید.";
+    }
+    if (message.includes("archived")) {
+      return "امکان لغو فاکتور برای کسب‌وکار بایگانی‌شده وجود ندارد.";
+    }
+    return FALLBACK_MESSAGES.VALIDATION_ERROR;
+  }
+  return FALLBACK_MESSAGES[error.code] ?? FALLBACK_MESSAGES.INTERNAL_ERROR;
+}
+
+export function deleteDraftErrorMessage(error: ActionError): string {
+  if (error.code === "VALIDATION_ERROR") {
+    const message = error.message.toLowerCase();
+    if (message.includes("finalized") || message.includes("cancelled")) {
+      return "تنها فاکتورهای پیش‌نویس قابل حذف هستند؛ فاکتورهای رسمی یا لغوشده به عنوان سابقه نگهداری می‌شوند.";
+    }
+    if (message.includes("archived")) {
+      return "امکان حذف پیش‌نویس برای کسب‌وکار بایگانی‌شده وجود ندارد.";
+    }
+    return FALLBACK_MESSAGES.VALIDATION_ERROR;
+  }
+  return FALLBACK_MESSAGES[error.code] ?? FALLBACK_MESSAGES.INTERNAL_ERROR;
+}
+
+export function duplicateErrorMessage(error: ActionError): string {
+  if (error.code === "FORBIDDEN") {
+    return "قابلیت کپی فاکتور در پلن رایگان فعال نیست. لطفاً پلن خود را به پایه یا حرفه‌ای ارتقا دهید.";
+  }
+  if (error.code === "VALIDATION_ERROR") {
+    const message = error.message.toLowerCase();
+    if (message.includes("archived customer") || message.includes("archived product")) {
+      return "این فاکتور به مشتری یا محصول بایگانی‌شده وابسته است و امکان کپی آن وجود ندارد.";
+    }
+    if (message.includes("archived business")) {
+      return "امکان کپی فاکتور برای کسب‌وکار بایگانی‌شده وجود ندارد.";
+    }
+    if (message.includes("no line items")) {
+      return "فاکتور بدون قلم قابل کپی نیست.";
+    }
+    return FALLBACK_MESSAGES.VALIDATION_ERROR;
+  }
   return FALLBACK_MESSAGES[error.code] ?? FALLBACK_MESSAGES.INTERNAL_ERROR;
 }

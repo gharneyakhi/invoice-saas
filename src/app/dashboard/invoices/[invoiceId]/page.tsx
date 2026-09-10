@@ -19,6 +19,9 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { FinalizeInvoiceButton } from "@/components/invoice/FinalizeInvoiceButton";
+import { CancelInvoiceButton } from "@/components/invoice/CancelInvoiceButton";
+import { DeleteDraftInvoiceButton } from "@/components/invoice/DeleteDraftInvoiceButton";
+import { DuplicateInvoiceButton } from "@/components/invoice/DuplicateInvoiceButton";
 import { InvoiceExportMenu } from "@/components/invoice/InvoiceExportMenu";
 import { GmailOutcomeBanner } from "@/components/invoice/GmailOutcomeBanner";
 import {
@@ -29,6 +32,8 @@ import {
   PrinterIcon,
 } from "@/components/icons";
 import {
+  canCancelInvoice,
+  canDeleteDraftInvoice,
   canFinalizeInvoice,
   isCancelledInvoice,
   isFinalizedInvoice,
@@ -192,6 +197,8 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
   const canFinalize = canFinalizeInvoice(invoiceLifecycle);
   const isFinalized = isFinalizedInvoice(invoiceLifecycle);
   const isCancelled = isCancelledInvoice(invoiceLifecycle);
+  const canCancel = canCancelInvoice(invoiceLifecycle);
+  const canDeleteDraft = canDeleteDraftInvoice(invoiceLifecycle);
 
   // For DRAFT invoices: resolve current BusinessProfile and live customer.
   let profile: SellerContactRow | null = null;
@@ -271,6 +278,8 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
               isDraft={isDraft}
               mode="detail"
             />
+            {/* Duplicate invoice action — available for drafts, finalized, and cancelled */}
+            <DuplicateInvoiceButton invoiceId={record.id} />
             {canFinalize && <FinalizeInvoiceButton invoiceId={record.id} />}
             {isDraft && (
               <Link href={`/dashboard/invoices/new?invoiceId=${encodeURIComponent(record.id)}`}>
@@ -279,6 +288,8 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
                 </Button>
               </Link>
             )}
+            {canDeleteDraft && <DeleteDraftInvoiceButton invoiceId={record.id} />}
+            {canCancel && <CancelInvoiceButton invoiceId={record.id} />}
             <BackButton />
           </div>
         }
@@ -287,18 +298,26 @@ export default async function InvoiceViewPage({ params }: InvoiceViewPageProps) 
       {/* Gmail connect outcome (?gmail=...) after the OAuth round-trip. */}
       <GmailOutcomeBanner />
 
-      {isFinalized && (
+      {isCancelled && (
+        <div className="flex items-center gap-3 rounded-xl border border-zinc-300 bg-zinc-100 px-4 py-3 text-xs leading-relaxed text-zinc-800">
+          <AlertCircleIcon size={18} className="shrink-0 text-zinc-600" />
+          <div className="space-y-0.5">
+            <p className="font-semibold">این فاکتور لغو شده است</p>
+            <p>
+              این فاکتور باطل شده است و امکان ویرایش یا ثبت پرداخت برای آن وجود ندارد. شماره رسمی و سوابق آن در سیستم حفظ شده است.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {isFinalized && !isCancelled && (
         <div className="flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs leading-relaxed text-emerald-800">
           <CheckCircleIcon size={18} className="shrink-0" />
           <div className="space-y-0.5">
             <p className="font-semibold">فاکتور نهایی شده است</p>
             <p>
               این فاکتور فقط‌خواندنی است و قابل ویرایش نیست.
-              {isCancelled ? (
-                <span> این فاکتور لغو شده است.</span>
-              ) : (
-                <span> شماره رسمی: {formatInvoiceIdentifierDisplay(invoice.status, invoice.invoiceNumber)}</span>
-              )}
+              <span> شماره رسمی: {formatInvoiceIdentifierDisplay(invoice.status, invoice.invoiceNumber)}</span>
             </p>
           </div>
         </div>

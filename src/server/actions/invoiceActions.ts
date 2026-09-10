@@ -2,7 +2,10 @@
 
 import { requireSession } from "@/server/auth/requireSession";
 import {
+  cancelInvoice as cancelInvoiceService,
   createDraftInvoice as createDraftInvoiceService,
+  deleteDraftInvoice as deleteDraftInvoiceService,
+  duplicateInvoice as duplicateInvoiceService,
   finalizeInvoice as finalizeInvoiceService,
   getInvoice as getInvoiceService,
   listInvoices as listInvoicesService,
@@ -152,3 +155,44 @@ export async function finalizeInvoice(invoiceId: string): Promise<ActionResult<I
     return toInvoiceDetailDTO(record);
   });
 }
+
+/**
+ * Cancels a previously finalized invoice the caller owns. The status transitions
+ * to CANCELLED and cancelledAt is recorded, while the official number, snapshots
+ * and payment records are preserved.
+ */
+export async function cancelInvoice(invoiceId: string): Promise<ActionResult<InvoiceDetailDTO>> {
+  return runAction(async () => {
+    await requireSession();
+    const record = await cancelInvoiceService(invoiceId);
+    return toInvoiceDetailDTO(record);
+  });
+}
+
+/**
+ * Deletes an un-finalized DRAFT invoice and its line items. Finalized and
+ * cancelled invoices are rejected to preserve historical records.
+ */
+export async function deleteDraftInvoice(
+  invoiceId: string,
+): Promise<ActionResult<{ id: string }>> {
+  return runAction(async () => {
+    await requireSession();
+    const result = await deleteDraftInvoiceService(invoiceId);
+    return result;
+  });
+}
+
+/**
+ * Creates a new DRAFT invoice cloned from an existing invoice (draft, finalized,
+ * or cancelled). Entitlement for INVOICE_DUPLICATION is checked; payments and
+ * snapshots are never copied, and a fresh draft placeholder is assigned.
+ */
+export async function duplicateInvoice(invoiceId: string): Promise<ActionResult<InvoiceDetailDTO>> {
+  return runAction(async () => {
+    await requireSession();
+    const record = await duplicateInvoiceService(invoiceId);
+    return toInvoiceDetailDTO(record);
+  });
+}
+

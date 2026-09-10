@@ -3,8 +3,15 @@ import {
   canFinalizeInvoice,
   isFinalizedInvoice,
   isCancelledInvoice,
+  canCancelInvoice,
+  canDeleteDraftInvoice,
   FINALIZATION_CONFIRMATION_MESSAGE,
+  CANCEL_CONFIRMATION_MESSAGE,
+  DELETE_DRAFT_CONFIRMATION_MESSAGE,
   finalizationErrorMessage,
+  cancelErrorMessage,
+  deleteDraftErrorMessage,
+  duplicateErrorMessage,
 } from "./finalization";
 
 describe("invoice finalization UI helpers", () => {
@@ -37,10 +44,41 @@ describe("invoice finalization UI helpers", () => {
     expect(isCancelledInvoice({ status: "DRAFT", finalizedAt: null })).toBe(false);
   });
 
-  it("includes the exact required confirmation text", () => {
-    expect(FINALIZATION_CONFIRMATION_MESSAGE).toBe(
-      "پس از نهایی کردن، فاکتور قابل ویرایش نخواهد بود. آیا مطمئن هستید؟",
-    );
+  it("allows cancellation only for finalized, un-cancelled invoices", () => {
+    expect(canCancelInvoice({ status: "ISSUED", finalizedAt: new Date("2026-03-10") })).toBe(true);
+    expect(canCancelInvoice({ status: "PAID", finalizedAt: new Date("2026-03-10") })).toBe(true);
+    expect(canCancelInvoice({ status: "DRAFT", finalizedAt: null })).toBe(false);
+    expect(canCancelInvoice({ status: "CANCELLED", finalizedAt: new Date("2026-03-10") })).toBe(false);
+  });
+
+  it("allows deleting draft only for untouched DRAFT invoices", () => {
+    expect(canDeleteDraftInvoice({ status: "DRAFT", finalizedAt: null })).toBe(true);
+    expect(canDeleteDraftInvoice({ status: "ISSUED", finalizedAt: new Date("2026-03-10") })).toBe(false);
+    expect(canDeleteDraftInvoice({ status: "CANCELLED", finalizedAt: new Date("2026-03-10") })).toBe(false);
+  });
+
+  it("includes confirmation messages", () => {
+    expect(FINALIZATION_CONFIRMATION_MESSAGE).toContain("نهایی کردن");
+    expect(CANCEL_CONFIRMATION_MESSAGE).toContain("لغو");
+    expect(DELETE_DRAFT_CONFIRMATION_MESSAGE).toContain("حذف");
+  });
+});
+
+describe("cancellation, draft deletion, and duplication error mapping", () => {
+  it("maps cancellation errors to clear Persian messages", () => {
+    expect(cancelErrorMessage({ code: "VALIDATION_ERROR", message: "Invoice is already cancelled" })).toContain("قبلاً لغو شده");
+    expect(cancelErrorMessage({ code: "VALIDATION_ERROR", message: "Draft invoices cannot be cancelled" })).toContain("پیش‌نویس");
+    expect(cancelErrorMessage({ code: "FORBIDDEN", message: "Forbidden" })).toContain("دسترسی");
+  });
+
+  it("maps draft deletion errors to clear Persian messages", () => {
+    expect(deleteDraftErrorMessage({ code: "VALIDATION_ERROR", message: "Finalized invoices cannot be deleted" })).toContain("تنها فاکتورهای پیش‌نویس");
+    expect(deleteDraftErrorMessage({ code: "FORBIDDEN", message: "Forbidden" })).toContain("دسترسی");
+  });
+
+  it("maps duplication errors to clear Persian messages", () => {
+    expect(duplicateErrorMessage({ code: "FORBIDDEN", message: "Invoice duplication is not available" })).toContain("پلن رایگان فعال نیست");
+    expect(duplicateErrorMessage({ code: "VALIDATION_ERROR", message: "Cannot duplicate invoice referencing an archived customer" })).toContain("مشتری یا محصول بایگانی‌شده");
   });
 });
 

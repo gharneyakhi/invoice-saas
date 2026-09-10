@@ -26,6 +26,10 @@ const prismaMock = vi.hoisted(() => ({
     create: vi.fn(),
     update: vi.fn(),
     updateMany: vi.fn(),
+    delete: vi.fn(),
+  },
+  auditLog: {
+    create: vi.fn(),
   },
   invoiceItem: {
     create: vi.fn(),
@@ -123,7 +127,24 @@ function planRow(
 }
 
 const FREE_PLAN = () => planRow("FREE", 1, 3, ["PDF_EXPORT", "DRAFT_INVOICES"]);
-const PRO_PLAN = () => planRow("PRO", 3, 50, ["MULTI_BUSINESS", "ADVANCED_REPORTS", "DRAFT_INVOICES"]);
+const BASIC_PLAN = () =>
+  planRow("BASIC", 1, 10, [
+    "PDF_EXPORT",
+    "PRINT",
+    "IMAGE_EXPORT",
+    "EXCEL_EXPORT",
+    "EMAIL_SEND",
+    "PROFORMA",
+    "DRAFT_INVOICES",
+    "INVOICE_DUPLICATION",
+  ]);
+const PRO_PLAN = () =>
+  planRow("PRO", 3, 50, [
+    "MULTI_BUSINESS",
+    "ADVANCED_REPORTS",
+    "DRAFT_INVOICES",
+    "INVOICE_DUPLICATION",
+  ]);
 
 function activeSubscription(plan: ReturnType<typeof PRO_PLAN> = PRO_PLAN()) {
   return {
@@ -2141,5 +2162,287 @@ describe("updateDraftInvoice", () => {
         updateDraftInvoice("biz-1", "inv-draft-1", UPDATE_PAYLOAD),
       ).rejects.toThrow("database connection lost");
     });
+  });
+});
+
+// ===========================================================================
+// INVOICE LIFECYCLE V2: cancelInvoice, deleteDraftInvoice, duplicateInvoice
+// ===========================================================================
+
+describe("cancelInvoice", () => {
+  function finalizedInvoiceRow(overrides = {}) {
+    return {
+      id: "inv-fin-1",
+      businessId: "biz-1",
+      customerId: "cust-1",
+      invoiceNumber: "INV-101",
+      invoiceType: "FINAL" as const,
+      issueDate: new Date("2026-03-01T10:00:00.000Z"),
+      dueDate: new Date("2026-03-20T10:00:00.000Z"),
+      status: "PENDING_PAYMENT" as const,
+      subtotal: new Decimal(100000),
+      itemDiscountAmount: new Decimal(0),
+      globalDiscountPercent: new Decimal(0),
+      globalDiscountAmount: new Decimal(0),
+      taxPercent: new Decimal(9),
+      taxAmount: new Decimal(9000),
+      taxableAmount: new Decimal(100000),
+      total: new Decimal(109000),
+      paidAmount: new Decimal(0),
+      remainingAmount: new Decimal(109000),
+      currency: "IRR",
+      notes: "توضیحات فاکتور رسمی",
+      createdAt: new Date("2026-03-01T10:00:00.000Z"),
+      updatedAt: new Date("2026-03-01T10:00:00.000Z"),
+      finalizedAt: new Date("2026-03-01T10:00:00.000Z"),
+      cancelledAt: null,
+      business: businessRow(),
+      items: [
+        {
+          id: "item-1",
+          invoiceId: "inv-fin-1",
+          productId: "prod-1",
+          title: "طراحی سایت",
+          description: null,
+          itemDate: null,
+          unitPrice: new Decimal(100000),
+          quantity: new Decimal(1),
+          unit: "عدد",
+          discountPercent: new Decimal(0),
+          discountAmount: new Decimal(0),
+          subtotal: new Decimal(100000),
+          total: new Decimal(100000),
+          sortOrder: 0,
+        },
+      ],
+      sellerSnapshot: businessProfileRow(),
+      customerSnapshot: customerRow(),
+      ...overrides,
+    };
+  }
+
+  it("successfully cancels a finalized invoice and sets status to CANCELLED with cancelledAt", async () => {
+    const { cancelInvoice } = await import("./invoiceService");
+    const inv = finalizedInvoiceRow();
+    prismaMock.invoice.findUnique.mockResolvedValue(inv);
+    prismaMock.invoice.update.mockResolvedValue({
+      ...inv,
+      status: "CANCELLED",
+      cancelledAt: NOW,
+    });
+
+    const result = await cancelInvoice("inv-fin-1", { now: NOW });
+
+    expect(prismaMock.$queryRaw).toHaveBeenCalled();
+    expect(prismaMock.invoice.update).toHaveBeenCalledWith({
+      where: { id: "inv-fin-1" },
+      data: {
+        status: "CANCELLED",
+        cancelledAt: NOW,
+      },
+      include: expect.any(Object),
+    });
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: "INVOICE_CANCELLED",
+        entityId: "inv-fin-1",
+      }),
+    });
+    expect(result.status).toBe("CANCELLED");
+    expect(result.cancelledAt).toEqual(NOW);
+  });
+
+  it("rejects cancelling a DRAFT invoice", async () => {
+    const { cancelInvoice } = await import("./invoiceService");
+    const draft = draftInvoiceRow();
+    prismaMock.invoice.findUnique.mockResolvedValue(draft);
+
+    await expect(cancelInvoice(draft.id)).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("rejects cancelling an already cancelled invoice", async () => {
+    const { cancelInvoice } = await import("./invoiceService");
+    const cancelled = finalizedInvoiceRow({
+      status: "CANCELLED",
+      cancelledAt: new Date("2026-03-05T10:00:00.000Z"),
+    });
+    prismaMock.invoice.findUnique.mockResolvedValue(cancelled);
+
+    await expect(cancelInvoice(cancelled.id)).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("rejects unauthenticated requests", async () => {
+    const { UnauthorizedError } = await import("@/server/auth/requireSession");
+    const { cancelInvoice } = await import("./invoiceService");
+    requireSession.mockRejectedValueOnce(new UnauthorizedError());
+
+    await expect(cancelInvoice("inv-fin-1")).rejects.toBeInstanceOf(UnauthorizedError);
+  });
+
+  it("rejects an invoice owned by another account", async () => {
+    const { ForbiddenError } = await import("@/server/auth/requireSession");
+    const { cancelInvoice } = await import("./invoiceService");
+    const inv = finalizedInvoiceRow({ business: businessRow({ accountId: "other-acc" }) });
+    prismaMock.invoice.findUnique.mockResolvedValue(inv);
+
+    await expect(cancelInvoice(inv.id)).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("rejects cancelling for an archived business", async () => {
+    const { cancelInvoice } = await import("./invoiceService");
+    const inv = finalizedInvoiceRow({ business: businessRow({ archivedAt: new Date() }) });
+    prismaMock.invoice.findUnique.mockResolvedValue(inv);
+
+    await expect(cancelInvoice(inv.id)).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("rejects a missing invoice ID", async () => {
+    const { cancelInvoice } = await import("./invoiceService");
+    await expect(cancelInvoice("")).rejects.toBeInstanceOf(ValidationError);
+  });
+});
+
+describe("deleteDraftInvoice", () => {
+  it("successfully deletes an un-finalized draft invoice and its items", async () => {
+    const { deleteDraftInvoice } = await import("./invoiceService");
+    const draft = draftInvoiceRow();
+    prismaMock.invoice.findUnique.mockResolvedValue(draft);
+    prismaMock.invoiceItem.deleteMany.mockResolvedValue({ count: 1 });
+    prismaMock.invoice.delete.mockResolvedValue(draft);
+
+    const result = await deleteDraftInvoice(draft.id);
+
+    expect(prismaMock.$queryRaw).toHaveBeenCalled();
+    expect(prismaMock.invoiceItem.deleteMany).toHaveBeenCalledWith({
+      where: { invoiceId: draft.id },
+    });
+    expect(prismaMock.invoice.delete).toHaveBeenCalledWith({
+      where: { id: draft.id },
+    });
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: "INVOICE_DRAFT_DELETED",
+        entityId: draft.id,
+      }),
+    });
+    expect(result).toEqual({ id: draft.id, success: true });
+  });
+
+  it("rejects deleting a finalized invoice", async () => {
+    const { deleteDraftInvoice } = await import("./invoiceService");
+    const finalized = {
+      ...draftInvoiceRow(),
+      status: "ISSUED" as const,
+      finalizedAt: new Date(),
+    };
+    prismaMock.invoice.findUnique.mockResolvedValue(finalized);
+
+    await expect(deleteDraftInvoice(finalized.id)).rejects.toBeInstanceOf(ValidationError);
+    expect(prismaMock.invoice.delete).not.toHaveBeenCalled();
+  });
+
+  it("rejects deleting a cancelled invoice", async () => {
+    const { deleteDraftInvoice } = await import("./invoiceService");
+    const cancelled = {
+      ...draftInvoiceRow(),
+      status: "CANCELLED" as const,
+      cancelledAt: new Date(),
+    };
+    prismaMock.invoice.findUnique.mockResolvedValue(cancelled);
+
+    await expect(deleteDraftInvoice(cancelled.id)).rejects.toBeInstanceOf(ValidationError);
+    expect(prismaMock.invoice.delete).not.toHaveBeenCalled();
+  });
+
+  it("rejects draft belonging to another account", async () => {
+    const { ForbiddenError } = await import("@/server/auth/requireSession");
+    const { deleteDraftInvoice } = await import("./invoiceService");
+    const draft = draftInvoiceRow({ business: businessRow({ accountId: "other-acc" }) });
+    prismaMock.invoice.findUnique.mockResolvedValue(draft);
+
+    await expect(deleteDraftInvoice(draft.id)).rejects.toBeInstanceOf(ForbiddenError);
+  });
+});
+
+describe("duplicateInvoice", () => {
+  beforeEach(() => {
+    prismaMock.plan.findUnique.mockResolvedValue(PRO_PLAN());
+    prismaMock.subscription.findMany.mockResolvedValue([activeSubscription(PRO_PLAN())]);
+    prismaMock.usagePeriod.findUnique.mockResolvedValue(usagePeriodRow());
+  });
+
+  it("creates a brand new DRAFT with fresh UUID placeholder, recalculated totals, and no payment/snapshot copied", async () => {
+    const { duplicateInvoice } = await import("./invoiceService");
+    const source = {
+      ...draftInvoiceRow(),
+      id: "inv-src-1",
+      invoiceNumber: "INV-100",
+      status: "PAID" as const,
+      finalizedAt: new Date("2026-03-01"),
+      paidAmount: new Decimal(109000),
+      remainingAmount: new Decimal(0),
+    };
+    prismaMock.invoice.findUnique.mockResolvedValue(source);
+    prismaMock.customer.findUnique.mockResolvedValue(customerRow());
+    prismaMock.product.findMany.mockResolvedValue([productRow()]);
+
+    const createdDraft = {
+      ...source,
+      id: "inv-dup-new",
+      invoiceNumber: "DRAFT-new-uuid-123",
+      status: "DRAFT" as const,
+      finalizedAt: null,
+      cancelledAt: null,
+      paidAmount: new Decimal(0),
+      remainingAmount: source.total,
+    };
+    prismaMock.invoice.create.mockResolvedValue(createdDraft);
+
+    const result = await duplicateInvoice("inv-src-1", { now: NOW });
+
+    expect(prismaMock.invoice.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        businessId: "biz-1",
+        status: "DRAFT",
+        paidAmount: new Decimal(0),
+        remainingAmount: source.total,
+        notes: source.notes,
+      }),
+      include: expect.any(Object),
+    });
+    // Fresh draft number
+    const createCall = prismaMock.invoice.create.mock.calls[0]?.[0];
+    expect(createCall.data.invoiceNumber).toMatch(/^DRAFT-/);
+    expect(createCall.data.invoiceNumber).not.toBe("INV-100");
+
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: "INVOICE_DUPLICATED",
+        entityId: "inv-dup-new",
+      }),
+    });
+  });
+
+  it("rejects duplication when plan does not have INVOICE_DUPLICATION (e.g. FREE plan)", async () => {
+    const { ForbiddenError } = await import("@/server/auth/requireSession");
+    const { duplicateInvoice } = await import("./invoiceService");
+
+    prismaMock.plan.findUnique.mockResolvedValue(FREE_PLAN());
+    prismaMock.subscription.findMany.mockResolvedValue([activeSubscription(FREE_PLAN() as any)]);
+
+    const source = draftInvoiceRow();
+    prismaMock.invoice.findUnique.mockResolvedValue(source);
+
+    await expect(duplicateInvoice(source.id)).rejects.toBeInstanceOf(ForbiddenError);
+    expect(prismaMock.invoice.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplication when referenced customer is archived", async () => {
+    const { duplicateInvoice } = await import("./invoiceService");
+    const source = draftInvoiceRow();
+    prismaMock.invoice.findUnique.mockResolvedValue(source);
+    prismaMock.customer.findUnique.mockResolvedValue(customerRow({ archivedAt: new Date() }));
+
+    await expect(duplicateInvoice(source.id)).rejects.toBeInstanceOf(ValidationError);
   });
 });
