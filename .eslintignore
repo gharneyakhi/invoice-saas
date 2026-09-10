@@ -1,0 +1,8 @@
+node_modules/
+.next/
+out/
+dist/
+coverage/
+
+# Generated font embed (341KB base64) — parsing it overflows the linter.
+src/server/export/fonts/vazirmatnFont.ts

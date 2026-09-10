@@ -8,7 +8,7 @@ const TEST_KEY = "a".repeat(64);
 // transaction API closely enough to test the bootstrap logic in isolation.
 const tx = {
   user: { upsert: vi.fn() },
-  oAuthConnection: { upsert: vi.fn() },
+  oAuthConnection: { upsert: vi.fn(), findUnique: vi.fn() },
   account: { findUnique: vi.fn(), create: vi.fn() },
   plan: { findUnique: vi.fn() },
   subscription: { create: vi.fn() },
@@ -38,6 +38,7 @@ describe("bootstrapUserOnGoogleLogin", () => {
     const { bootstrapUserOnGoogleLogin } = await import("./bootstrap");
 
     tx.user.upsert.mockResolvedValue({ id: "user-1" });
+    tx.oAuthConnection.findUnique.mockResolvedValue(null); // first login: no existing OAuth row
     tx.account.findUnique.mockResolvedValue(null); // no existing account -> first login
     tx.plan.findUnique.mockResolvedValue({ id: "plan-free", key: "FREE" });
     tx.account.create.mockResolvedValue({ id: "acc-1", status: "ACTIVE", ownerUserId: "user-1" });
@@ -150,5 +151,42 @@ describe("bootstrapUserOnGoogleLogin", () => {
     await expect(
       bootstrapUserOnGoogleLogin({ googleId: "", email: "", name: "x", avatarUrl: null }),
     ).rejects.toThrow();
+  });
+
+  it("preserves a previously granted gmail.send scope when a returning login supplies login-only scopes", async () => {
+    const { bootstrapUserOnGoogleLogin } = await import("./bootstrap");
+
+    tx.user.upsert.mockResolvedValue({ id: "user-1" });
+    // Returning user whose OAuth row already carries the Gmail grant from
+    // the separate connect flow.
+    tx.oAuthConnection.findUnique.mockResolvedValue({
+      scope: "openid email profile https://www.googleapis.com/auth/gmail.send",
+    });
+    tx.account.findUnique.mockResolvedValue({ id: "acc-1", status: "ACTIVE" });
+
+    await bootstrapUserOnGoogleLogin({
+      googleId: "g-123",
+      email: "sara@example.com",
+      name: "سارا",
+      avatarUrl: null,
+      accessToken: "new-login-access-token",
+      // No refresh token on this login (typical with prompt=select_account):
+      // the stored Gmail refresh token must survive.
+      refreshToken: null,
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      scope: "openid email profile",
+    });
+
+    expect(tx.oAuthConnection.upsert).toHaveBeenCalledTimes(1);
+    const upsertArg = tx.oAuthConnection.upsert.mock.calls[0]?.[0] as {
+      update: { scope: string; refreshTokenEncrypted?: string };
+      create: { scope: string };
+    };
+    // Login-only scopes must UNION with the stored grant, never wipe it.
+    expect(upsertArg.update.scope).toContain("openid");
+    expect(upsertArg.update.scope).toContain("https://www.googleapis.com/auth/gmail.send");
+    expect(upsertArg.create.scope).toContain("https://www.googleapis.com/auth/gmail.send");
+    // No new refresh token supplied -> must not overwrite the stored one.
+    expect(upsertArg.update).not.toHaveProperty("refreshTokenEncrypted");
   });
 });
