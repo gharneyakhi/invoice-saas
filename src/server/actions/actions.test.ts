@@ -47,6 +47,9 @@ const invoiceSvc = vi.hoisted(() => ({
   createDraftInvoice: vi.fn(),
   updateDraftInvoice: vi.fn(),
   finalizeInvoice: vi.fn(),
+  cancelInvoice: vi.fn(),
+  deleteDraftInvoice: vi.fn(),
+  duplicateInvoice: vi.fn(),
 }));
 
 const paymentSvc = vi.hoisted(() => ({
@@ -882,6 +885,58 @@ describe("invoice actions", () => {
 
     expect(invoiceSvc.listInvoices).toHaveBeenCalledWith("biz-1", { status: "DRAFT", limit: 10 });
     expect(result.success).toBe(true);
+  });
+
+  it("cancels a finalized invoice through the service and returns a serializable DTO", async () => {
+    const { cancelInvoice } = await import("./invoiceActions");
+    invoiceSvc.cancelInvoice.mockResolvedValue(
+      invoiceRecord({
+        invoiceNumber: "101",
+        status: "CANCELLED",
+        finalizedAt: new Date("2026-03-05T10:00:00.000Z"),
+        cancelledAt: new Date("2026-03-06T10:00:00.000Z"),
+      }),
+    );
+
+    const result = await cancelInvoice("inv-1");
+
+    expect(invoiceSvc.cancelInvoice).toHaveBeenCalledWith("inv-1");
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.status).toBe("CANCELLED");
+    expect(result.data.cancelledAt).toBe("2026-03-06T10:00:00.000Z");
+  });
+
+  it("deletes a draft invoice through the service", async () => {
+    const { deleteDraftInvoice } = await import("./invoiceActions");
+    invoiceSvc.deleteDraftInvoice.mockResolvedValue({ id: "inv-draft-1", success: true });
+
+    const result = await deleteDraftInvoice("inv-draft-1");
+
+    expect(invoiceSvc.deleteDraftInvoice).toHaveBeenCalledWith("inv-draft-1");
+    expect(result).toEqual({ success: true, data: { id: "inv-draft-1", success: true } });
+  });
+
+  it("duplicates an invoice through the service and returns the new draft DTO", async () => {
+    const { duplicateInvoice } = await import("./invoiceActions");
+    invoiceSvc.duplicateInvoice.mockResolvedValue(
+      invoiceRecord({
+        id: "inv-dup-1",
+        invoiceNumber: "DRAFT-new-uuid",
+        status: "DRAFT",
+        finalizedAt: null,
+        cancelledAt: null,
+      }),
+    );
+
+    const result = await duplicateInvoice("inv-1");
+
+    expect(invoiceSvc.duplicateInvoice).toHaveBeenCalledWith("inv-1");
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.id).toBe("inv-dup-1");
+    expect(result.data.status).toBe("DRAFT");
+    expect(result.data.finalizedAt).toBeNull();
   });
 });
 

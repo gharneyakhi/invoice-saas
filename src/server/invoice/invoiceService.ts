@@ -20,6 +20,7 @@ import {
   type CreateDraftInvoiceInput,
 } from "@/server/invoice/schema";
 import { normalizeInvoiceCurrency } from "@/lib/currency";
+import { canDuplicateInvoice } from "@/lib/entitlements";
 
 /**
  * Row shape of an invoice line item (mirrors `model InvoiceItem` in
@@ -1243,6 +1244,373 @@ export async function finalizeInvoice(
     });
 
     return finalized as unknown as InvoiceRecord;
+  };
+
+  if (options.client) {
+    return runWithTx(options.client);
+  }
+
+  return prisma.$transaction(runWithTx);
+}
+
+// ---------------------------------------------------------------------------
+// Invoice Lifecycle V2: cancelInvoice, deleteDraftInvoice, duplicateInvoice
+// ---------------------------------------------------------------------------
+
+export interface CancelInvoiceOptions {
+  now?: Date;
+  client?: Prisma.TransactionClient;
+}
+
+/**
+ * Cancels a previously finalized invoice safely.
+ *
+ * Requirements & Invariants:
+ *   1. Requires an authenticated session (`requireSession()`).
+ *   2. Proves the target business belongs to the session account.
+ *   3. Rejects cancellation if the business is archived.
+ *   4. Only FINALIZED invoices can be cancelled. Draft invoices cannot be cancelled
+ *      (use `deleteDraftInvoice` instead).
+ *   5. Rejects already cancelled invoices (`cancelledAt !== null` or `status === "CANCELLED"`).
+ *   6. Official invoice number is NEVER freed, cleared, or reused.
+ *   7. Immutable seller and customer snapshots are PRESERVED.
+ *   8. Payment history (InvoicePayment rows) is PRESERVED.
+ *   9. Sets `status: "CANCELLED"` and `cancelledAt: now`.
+ *  10. Consumed quota is NOT refunded or decremented.
+ *  11. Executes inside a database transaction with a row lock (`SELECT ... FOR UPDATE`).
+ *  12. Records an AuditLog entry.
+ */
+export async function cancelInvoice(
+  invoiceId: string,
+  options: CancelInvoiceOptions = {},
+): Promise<InvoiceRecord> {
+  const cleanInvoiceId = assertInvoiceId(invoiceId);
+  const session = await requireSession();
+  const now = options.now ?? new Date();
+
+  const runWithTx = async (tx: Prisma.TransactionClient) => {
+    // 0. Lock invoice row to prevent concurrent mutations
+    await tx.$queryRaw`SELECT id FROM "invoices" WHERE id = ${cleanInvoiceId} FOR UPDATE`;
+
+    // 1. Load invoice with business, items, snapshots
+    const invoice = await tx.invoice.findUnique({
+      where: { id: cleanInvoiceId },
+      include: {
+        business: true,
+        items: { orderBy: { sortOrder: "asc" } },
+        sellerSnapshot: true,
+        customerSnapshot: true,
+      },
+    });
+
+    if (!invoice) {
+      throw new NotFoundError("Invoice not found");
+    }
+
+    // 2. Ownership check
+    if (invoice.business.accountId !== session.accountId) {
+      throw new ForbiddenError("Invoice does not belong to this account");
+    }
+
+    // 3. Business archived check
+    if (invoice.business.archivedAt !== null) {
+      throw new ValidationError("Cannot cancel invoice for an archived business");
+    }
+
+    // 4. Lifecycle checks: only finalized invoices can be cancelled
+    if (invoice.status === "DRAFT" || invoice.finalizedAt === null) {
+      throw new ValidationError("Draft invoices cannot be cancelled; only finalized invoices can be cancelled");
+    }
+
+    if (invoice.status === "CANCELLED" || invoice.cancelledAt !== null) {
+      throw new ValidationError("Invoice is already cancelled");
+    }
+
+    // 5. Update invoice to CANCELLED
+    const updated = await tx.invoice.update({
+      where: { id: invoice.id },
+      data: {
+        status: "CANCELLED",
+        cancelledAt: now,
+      },
+      include: {
+        items: { orderBy: { sortOrder: "asc" } },
+        sellerSnapshot: true,
+        customerSnapshot: true,
+      },
+    });
+
+    // 6. AuditLog record
+    await tx.auditLog.create({
+      data: {
+        accountId: session.accountId,
+        userId: session.userId,
+        action: "INVOICE_CANCELLED",
+        entityType: "Invoice",
+        entityId: invoice.id,
+        metadata: {
+          invoiceNumber: invoice.invoiceNumber,
+          businessId: invoice.businessId,
+          cancelledAt: now.toISOString(),
+        },
+      },
+    });
+
+    return updated as unknown as InvoiceRecord;
+  };
+
+  if (options.client) {
+    return runWithTx(options.client);
+  }
+
+  return prisma.$transaction(runWithTx);
+}
+
+export interface DeleteDraftInvoiceOptions {
+  client?: Prisma.TransactionClient;
+}
+
+/**
+ * Deletes a DRAFT invoice and its line items safely.
+ *
+ * Requirements & Invariants:
+ *   1. Requires an authenticated session (`requireSession()`).
+ *   2. Proves the target business belongs to the session account.
+ *   3. Rejects deletion if the business is archived.
+ *   4. ONLY DRAFT invoices can be deleted. Finalized and cancelled invoices cannot
+ *      be deleted (accounting history is immutable).
+ *   5. Does NOT touch or alter quota / `UsagePeriod` (drafts never consumed quota).
+ *   6. Line items are deleted atomically.
+ *   7. Records an AuditLog entry.
+ */
+export async function deleteDraftInvoice(
+  invoiceId: string,
+  options: DeleteDraftInvoiceOptions = {},
+): Promise<{ id: string; success: boolean }> {
+  const cleanInvoiceId = assertInvoiceId(invoiceId);
+  const session = await requireSession();
+
+  const runWithTx = async (tx: Prisma.TransactionClient) => {
+    // 0. Lock invoice row
+    await tx.$queryRaw`SELECT id FROM "invoices" WHERE id = ${cleanInvoiceId} FOR UPDATE`;
+
+    // 1. Load invoice with business
+    const invoice = await tx.invoice.findUnique({
+      where: { id: cleanInvoiceId },
+      include: { business: true },
+    });
+
+    if (!invoice) {
+      throw new NotFoundError("Invoice not found");
+    }
+
+    // 2. Ownership check
+    if (invoice.business.accountId !== session.accountId) {
+      throw new ForbiddenError("Invoice does not belong to this account");
+    }
+
+    // 3. Business archived check
+    if (invoice.business.archivedAt !== null) {
+      throw new ValidationError("Cannot delete draft invoice for an archived business");
+    }
+
+    // 4. Lifecycle check: ONLY drafts can be deleted
+    if (invoice.status !== "DRAFT" || invoice.finalizedAt !== null) {
+      throw new ValidationError(
+        invoice.status === "CANCELLED" || invoice.cancelledAt !== null
+          ? "Cancelled invoices cannot be deleted; accounting history must be preserved"
+          : "Finalized invoices cannot be deleted; only draft invoices can be deleted",
+      );
+    }
+
+    // 5. Delete items then invoice (explicit delete inside tx)
+    await tx.invoiceItem.deleteMany({
+      where: { invoiceId: invoice.id },
+    });
+
+    await tx.invoice.delete({
+      where: { id: invoice.id },
+    });
+
+    // 6. AuditLog record
+    await tx.auditLog.create({
+      data: {
+        accountId: session.accountId,
+        userId: session.userId,
+        action: "INVOICE_DRAFT_DELETED",
+        entityType: "Invoice",
+        entityId: invoice.id,
+        metadata: {
+          businessId: invoice.businessId,
+        },
+      },
+    });
+
+    return { id: invoice.id, success: true };
+  };
+
+  if (options.client) {
+    return runWithTx(options.client);
+  }
+
+  return prisma.$transaction(runWithTx);
+}
+
+export interface DuplicateInvoiceOptions {
+  now?: Date;
+  client?: Prisma.TransactionClient;
+}
+
+/**
+ * Creates a brand new DRAFT invoice cloned from an existing invoice (draft, finalized, or cancelled).
+ *
+ * Requirements & Invariants:
+ *   1. Requires an authenticated session (`requireSession()`).
+ *   2. Proves the target business belongs to the session account.
+ *   3. Rejects duplication if the business is archived.
+ *   4. Entitlements check: verifies `canDuplicateInvoice` (feature `INVOICE_DUPLICATION`,
+ *      allowed on Basic and Pro plans).
+ *   5. Never reuses the official invoice number; generates a fresh `DRAFT-<UUID>` placeholder.
+ *   6. Status is initialized to `DRAFT` with `finalizedAt: null`, `cancelledAt: null`, and `currency: null`.
+ *   7. Re-verifies customer (if any) and referenced products against business & archive rules.
+ *   8. Server-side authoritative recalculation of all totals using calculation engine.
+ *   9. Payment status and payment records are NEVER copied (`paidAmount: 0`, `remainingAmount: total`).
+ *  10. Immutable snapshots from the original invoice are NEVER attached/copied to the new draft.
+ *  11. Does NOT consume invoice quota (draft creation is quota-free).
+ *  12. Records an AuditLog entry.
+ */
+export async function duplicateInvoice(
+  invoiceId: string,
+  options: DuplicateInvoiceOptions = {},
+): Promise<InvoiceRecord> {
+  const cleanInvoiceId = assertInvoiceId(invoiceId);
+  const session = await requireSession();
+  const now = options.now ?? new Date();
+
+  const runWithTx = async (tx: Prisma.TransactionClient) => {
+    // 1. Entitlements check for INVOICE_DUPLICATION
+    const entitlements = await resolveEntitlements({ client: tx, now, session });
+    if (!canDuplicateInvoice(entitlements.plan, entitlements.subscription, entitlements.freePlan)) {
+      throw new ForbiddenError(
+        `Invoice duplication is not available on the ${entitlements.plan.planKey} plan. Please upgrade your plan.`,
+      );
+    }
+
+    // 2. Load source invoice with items and business
+    const sourceInvoice = await tx.invoice.findUnique({
+      where: { id: cleanInvoiceId },
+      include: {
+        business: true,
+        items: { orderBy: { sortOrder: "asc" } },
+      },
+    });
+
+    if (!sourceInvoice) {
+      throw new NotFoundError("Invoice not found");
+    }
+
+    // 3. Ownership check
+    if (sourceInvoice.business.accountId !== session.accountId) {
+      throw new ForbiddenError("Invoice does not belong to this account");
+    }
+
+    // 4. Business archived check
+    if (sourceInvoice.business.archivedAt !== null) {
+      throw new ValidationError("Cannot duplicate invoice for an archived business");
+    }
+
+    // 5. Customer reference check (if referenced)
+    if (sourceInvoice.customerId) {
+      await assertCustomerReference(tx, sourceInvoice.businessId, sourceInvoice.customerId);
+    }
+
+    // 6. Product references check (if referenced by line items)
+    await assertProductReferences(tx, sourceInvoice.businessId, sourceInvoice.items);
+
+    if (!sourceInvoice.items || sourceInvoice.items.length === 0) {
+      throw new ValidationError("Cannot duplicate an invoice with no line items");
+    }
+
+    const sourceItems = sourceInvoice.items as unknown as InvoiceItemRecord[];
+
+    // 7. Authoritative calculation
+    const calculationInput: InvoiceCalculationInput = {
+      items: sourceItems.map((item) => ({
+        unitPrice: item.unitPrice,
+        quantity: item.quantity,
+        discountPercent: item.discountPercent,
+      })),
+      globalDiscountPercent: sourceInvoice.globalDiscountPercent,
+      taxPercent: sourceInvoice.taxPercent,
+    };
+
+    const calcResult = calculateInvoice(calculationInput);
+
+    // 8. Generate safe unique draft placeholder
+    const draftInvoiceNumber = generateDraftInvoiceNumber();
+
+    // 9. Persist new DRAFT invoice + items atomically
+    const newInvoice = await tx.invoice.create({
+      data: {
+        businessId: sourceInvoice.businessId,
+        customerId: sourceInvoice.customerId ?? null,
+        invoiceNumber: draftInvoiceNumber,
+        invoiceType: sourceInvoice.invoiceType,
+        issueDate: now,
+        dueDate: null,
+        status: "DRAFT",
+        subtotal: calcResult.subtotal,
+        itemDiscountAmount: calcResult.itemDiscountAmount,
+        globalDiscountPercent: calcResult.globalDiscountPercent,
+        globalDiscountAmount: calcResult.globalDiscountAmount,
+        taxPercent: calcResult.taxPercent,
+        taxAmount: calcResult.taxAmount,
+        taxableAmount: calcResult.taxableAmount,
+        total: calcResult.total,
+        paidAmount: new Decimal(0),
+        remainingAmount: calcResult.total,
+        notes: sourceInvoice.notes ?? null,
+        items: {
+          create: sourceItems.map((item, index) => {
+            const lineCalc = calcResult.items[index]!;
+            return {
+              productId: item.productId ?? null,
+              title: item.title,
+              description: item.description ?? null,
+              itemDate: item.itemDate,
+              unitPrice: new Decimal(item.unitPrice),
+              quantity: new Decimal(item.quantity),
+              unit: item.unit ?? null,
+              discountPercent: new Decimal(item.discountPercent),
+              discountAmount: lineCalc.discountAmount,
+              subtotal: lineCalc.subtotal,
+              total: lineCalc.total,
+              sortOrder: item.sortOrder ?? index,
+            };
+          }),
+        },
+      },
+      include: {
+        items: { orderBy: { sortOrder: "asc" } },
+      },
+    });
+
+    // 10. AuditLog record
+    await tx.auditLog.create({
+      data: {
+        accountId: session.accountId,
+        userId: session.userId,
+        action: "INVOICE_DUPLICATED",
+        entityType: "Invoice",
+        entityId: newInvoice.id,
+        metadata: {
+          sourceInvoiceId: sourceInvoice.id,
+          businessId: sourceInvoice.businessId,
+        },
+      },
+    });
+
+    return newInvoice as unknown as InvoiceRecord;
   };
 
   if (options.client) {
