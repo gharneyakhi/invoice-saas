@@ -563,6 +563,52 @@ outcomes directly instead of forcing a draft-save step first.
 * `vitest.config.ts` sets the same automatic JSX runtime Next uses, so pure
   presentational components can be rendered in the node test environment.
 
+## 9c. Export & Sharing V1 — print, PDF/PNG/JPG/Excel, Telegram, Gmail (completed)
+
+One compact «خروجی و اشتراک‌گذاری» menu on the invoice detail and preview
+pages exposes all seven actions: چاپ (existing A4 print CSS, unchanged),
+PDF, PNG, JPG, Excel (`.xlsx`), اشتراک‌گذاری در تلگرام, ارسال PDF با Gmail. File
+downloads are same-origin links to an authenticated route; the share flows
+open dialogs fed by one `getExportMetadata` Server Action.
+
+### What changed
+
+| Area | Change |
+| --- | --- |
+| Single source of truth | `exportService.getInvoiceExportSource` / `getInvoiceExportBundle` are the only export entry points; both delegate to the existing `previewService.getInvoicePreviewData`, so auth (session → business ownership → invoice membership), snapshot selection and stored money values are inherited, never re-implemented. No second calculation engine: generators render stored Decimal strings verbatim. |
+| PDF | This branch's UBA-pipeline `pdfService.renderInvoicePdf` (`pdf-lib` + embedded Vazirmatn via `@pdf-lib/fontkit`, `bidi-js` reordering, hmtx advances) serves the `?format=pdf` download and the Gmail attachment; the `PDF_EXPORT` entitlement gate is preserved. Finalized rows render their immutable snapshots, drafts the current profile + an unofficial notice. |
+| PNG / JPG | `imageService` builds an A4-ratio SVG from the shared content model (`exportContent.buildPdfContent`, recovered alongside) and rasterizes it with `sharp` (high-res, q90 JPEG). |
+| Excel | `excelService` writes a real RTL `.xlsx` with `exceljs` (items, verbatim totals, stored payments, brand header). |
+| Telegram | Honest manual share only: `telegram.ts` builds the share text + `t.me/share/url` deep link; the dialog states explicitly that nothing is auto-sent (`hasFileAttachment: false`, PDF downloads separately). No fake “sent” state anywhere. |
+| Gmail | `gmailOAuth` (signed HMAC state, offline+consent connect URL, code exchange) + `gmailService` (encrypted refresh-token send via Gmail API v1, MIME builder, success only on API message id). `/api/gmail/connect` + `/api/gmail/callback` routes; tokens are encrypted at rest and never reach the browser. |
+| Filenames | `filename.ts` sanitizes `فاکتور-<number>.<ext>` + ASCII fallback; routes serve `Content-Disposition` (RFC 5987) + `no-store`. |
+| Errors | `ActionErrorCode` += `GMAIL_NOT_CONNECTED` / `GMAIL_SEND_FAILED` / `GMAIL_NOT_CONFIGURED`; existing exhaustive UI maps extended. |
+
+### Invariants deliberately left untouched
+
+* Calculation, payment, finalization, currency and seller/customer snapshot
+  semantics — byte-for-byte; exports consume `InvoicePreviewModel` only.
+* Entitlement/quota checks — exports are read-only and consume no quota.
+* The preview/print document markup — exports mirror it, never replace it.
+* Google login scopes stay `openid email profile`; the Gmail-send scope is
+  requested only inside the explicit connect flow.
+
+### Verification
+
+* Recovered suites: `filename`, `exportService`, `imageService` (+`imageAssets`, covering the shared content model), `excelService`, `telegram`, `gmailOAuth`, `gmailService`, `exportActions`, the three route tests and `invoiceExportRender` (render-level UI honesty tests) — plus menu interaction tests. The PDF engine keeps this branch's UBA suites (`bidi`, `persianText`, `glyphOrder`, `pdfService`).
+* Manual: seeded local stack, all four downloads byte-inspected
+  (PDF magic + embedded font, PNG/JPG dimensions, XLSX round-trip),
+  Telegram deep link + disclaimer, Gmail connect URL params and the
+  not-connected → connect → send flow up to the Google boundary
+  (real delivery needs production Google credentials).
+* Provenance: UI, routes, actions, Gmail/Telegram/Excel/image services and
+  the content model were recovered from the Export V1 branch (`dd2d54c`)
+  and rewired to this branch's PDF engine (`renderInvoicePdf`) with the
+  `PDF_EXPORT` gate intact; the only engine-adjacent change is the
+  `buildPdfContent` relocation to `exportContent.ts`.
+* `npx tsc --noEmit` — identical error set to `main` (only the
+  stub-`@prisma/client` errors, none from this milestone); `npx eslint .` clean.
+
 ## 10. Running locally (once you have the above)
 
 ```bash
