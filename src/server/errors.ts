@@ -66,6 +66,23 @@ export class FileStorageNotConfiguredError extends Error {
 }
 
 /**
+ * The account already has a subscription that is genuinely in force (an
+ * `ACTIVE` row inside its window on an active plan, per the shared
+ * `selectCurrentSubscription()` rule). Starting another checkout would create
+ * a competing active subscription, so purchase requests are refused until the
+ * current one ends or is cancelled. Upgrades/downgrades need proration and
+ * are deliberately out of scope for now.
+ */
+export class SubscriptionAlreadyActiveError extends Error {
+  readonly code = "SUBSCRIPTION_ALREADY_ACTIVE" as const;
+
+  constructor(message = "This account already has an active subscription") {
+    super(message);
+    this.name = "SubscriptionAlreadyActiveError";
+  }
+}
+
+/**
  * A real object-storage write failed after the S3-compatible adapter was
  * configured (provider rejection, network failure, invalid credentials, ...).
  *
