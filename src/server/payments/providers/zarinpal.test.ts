@@ -8,9 +8,15 @@ import {
 
 /**
  * Unit tests for the ZarinPal v4 adapter. The HTTP layer is mocked so these
- * tests pin the adapter's contract only: envelope parsing, success/error
- * mapping, safe error messages, and the guarantee that the merchant id never
- * escapes in a return value or error.
+ * tests pin the adapter's contract only: envelope parsing (the documented
+ * OBJECT-shaped v4 `data`, plus tolerant handling of the legacy array form),
+ * success/error mapping, the documented /pg/v4/ endpoint paths, safe error
+ * messages, and the guarantee that the merchant id never escapes in a return
+ * value or error.
+ *
+ * The mocked bodies mirror the official documentation's response examples
+ * (zarinpal.com/docs/paymentGateway/connectToGateway):
+ *   { "data": { "code": 100, "message": "Success", "authority": "..." }, "errors": [] }
  */
 const postJson = vi.hoisted(() => vi.fn());
 
@@ -43,10 +49,13 @@ afterEach(() => {
 });
 
 describe("payments/providers/zarinpal — createPayment", () => {
-  it("posts a v4 request payload to the sandbox host and returns authority + redirect URL", async () => {
+  it("posts to the documented sandbox /pg/v4 path and returns authority + StartPay redirect URL", async () => {
     postJson.mockResolvedValue({
       status: 200,
-      body: { data: [{ code: 100, authority: "A0000000000000000000000000000abc" }] },
+      body: {
+        data: { code: 100, message: "Success", authority: "A0000000000000000000000000000abc", fee: 100 },
+        errors: [],
+      },
     });
 
     const result = await provider().createPayment(VALID_INPUT);
@@ -57,7 +66,7 @@ describe("payments/providers/zarinpal — createPayment", () => {
     );
 
     const [url, payload] = postJson.mock.calls[0] as unknown as [string, Record<string, unknown>];
-    expect(url).toBe("https://sandbox.zarinpal.com/api/v4/payment/request.json");
+    expect(url).toBe("https://sandbox.zarinpal.com/pg/v4/payment/request.json");
     expect(payload.merchant_id).toBe(MERCHANT_ID);
     expect(payload.amount).toBe(990000);
     expect(payload.currency).toBe("IRR");
@@ -65,24 +74,32 @@ describe("payments/providers/zarinpal — createPayment", () => {
     expect(payload.description).toBe("PRO subscription");
   });
 
-  it("uses the production host when PAYMENT_SANDBOX is not 'true'", async () => {
+  it("uses the production host (same documented path) when PAYMENT_SANDBOX is not 'true'", async () => {
     postJson.mockResolvedValue({
       status: 200,
-      body: { data: [{ code: 100, authority: "A1" }] },
+      body: { data: { code: 100, message: "Success", authority: "A1" }, errors: [] },
     });
 
-    const result = createZarinpalProvider({ PAYMENT_MERCHANT_ID: MERCHANT_ID }).createPayment(
-      VALID_INPUT,
-    );
-    await result;
+    await createZarinpalProvider({ PAYMENT_MERCHANT_ID: MERCHANT_ID }).createPayment(VALID_INPUT);
     const [url] = postJson.mock.calls[0] as unknown as [string];
-    expect(url).toContain("https://payment.zarinpal.com/");
+    expect(url).toBe("https://payment.zarinpal.com/pg/v4/payment/request.json");
+  });
+
+  it("tolerates the legacy array-shaped data envelope too", async () => {
+    postJson.mockResolvedValue({
+      status: 200,
+      body: { data: [{ code: 100, message: "Success", authority: "A-ARRAY" }], errors: [] },
+    });
+
+    const result = await provider().createPayment(VALID_INPUT);
+    expect(result.authority).toBe("A-ARRAY");
+    expect(result.redirectUrl).toBe("https://sandbox.zarinpal.com/pg/StartPay/A-ARRAY");
   });
 
   it("throws a typed, message-safe error when the gateway rejects with a data code", async () => {
     postJson.mockResolvedValue({
       status: 200,
-      body: { data: [{ code: -10 }], errors: [] },
+      body: { data: { code: -10, message: "merchant invalid" }, errors: [] },
     });
 
     try {
@@ -97,11 +114,50 @@ describe("payments/providers/zarinpal — createPayment", () => {
     }
   });
 
+  it("extracts the failure code from an errors envelope when data is absent", async () => {
+    // Documented failure shape: data missing, errors is an object with code/message.
+    postJson.mockResolvedValue({
+      status: 200,
+      body: {
+        errors: { code: -9, message: "Invalid request", validations: [] },
+      },
+    });
+
+    try {
+      await provider().createPayment(VALID_INPUT);
+      expect.unreachable("expected PaymentProviderError");
+    } catch (error) {
+      expect(error).toBeInstanceOf(PaymentProviderError);
+      expect((error as PaymentProviderError).providerCode).toBe("-9");
+      expect((error as PaymentProviderError).message).toBe(
+        "The payment request was invalid. Please try again.",
+      );
+    }
+  });
+
+  it("extracts the failure code from an array-shaped errors envelope too", async () => {
+    postJson.mockResolvedValue({
+      status: 200,
+      body: { data: null, errors: [{ code: -51, message: "raw gateway text" }] },
+    });
+
+    try {
+      await provider().createPayment(VALID_INPUT);
+      expect.unreachable("expected PaymentProviderError");
+    } catch (error) {
+      expect(error).toBeInstanceOf(PaymentProviderError);
+      expect((error as PaymentProviderError).providerCode).toBe("-51");
+      expect((error as PaymentProviderError).message).toBe(
+        "The payment was not completed successfully.",
+      );
+    }
+  });
+
   it("uses the generic safe message for unknown codes and never leaks the gateway body", async () => {
     postJson.mockResolvedValue({
       status: 200,
       body: {
-        data: [{ code: -77 }],
+        data: { code: -77 },
         errors: { code: -77, message: "merchant 11111111-2222-3333-4444-555555555555 is bankrupt" },
       },
     });
@@ -120,7 +176,15 @@ describe("payments/providers/zarinpal — createPayment", () => {
   });
 
   it("treats a missing/empty authority as a gateway rejection", async () => {
-    postJson.mockResolvedValue({ status: 200, body: { data: [{ code: 100 }] } });
+    postJson.mockResolvedValue({
+      status: 200,
+      body: { data: { code: 100, message: "Success" }, errors: [] },
+    });
+    await expect(provider().createPayment(VALID_INPUT)).rejects.toBeInstanceOf(PaymentProviderError);
+  });
+
+  it("treats a malformed envelope (no usable data) as a gateway rejection", async () => {
+    postJson.mockResolvedValue({ status: 200, body: { unexpected: true } });
     await expect(provider().createPayment(VALID_INPUT)).rejects.toBeInstanceOf(PaymentProviderError);
   });
 
@@ -149,20 +213,32 @@ describe("payments/providers/zarinpal — verifyPayment", () => {
     authority: "A0000000000000000000000000000abc",
   };
 
-  it("maps code 100 to VERIFIED with the gateway reference id", async () => {
+  it("posts to the documented /pg/v4 verify path with only merchant_id + amount + authority", async () => {
     postJson.mockResolvedValue({
       status: 200,
-      body: { data: [{ code: 100, ref_id: 123456 }] },
+      body: {
+        data: { code: 100, message: "Verified", ref_id: 123456, card_pan: "502229******5995" },
+        errors: [],
+      },
     });
 
     const result = await provider().verifyPayment(VERIFY_INPUT);
+
     expect(result).toEqual({ status: "VERIFIED", referenceId: "123456", code: 100 });
+
+    const [url, payload] = postJson.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    expect(url).toBe("https://sandbox.zarinpal.com/pg/v4/payment/verify.json");
+    expect(payload).toEqual({
+      merchant_id: MERCHANT_ID,
+      amount: 990000,
+      authority: VERIFY_INPUT.authority,
+    });
   });
 
   it("maps code 101 (already verified) to VERIFIED too", async () => {
     postJson.mockResolvedValue({
       status: 200,
-      body: { data: [{ code: 101, ref_id: 123456 }] },
+      body: { data: { code: 101, message: "Verified", ref_id: 123456 }, errors: [] },
     });
 
     const result = await provider().verifyPayment(VERIFY_INPUT);
@@ -171,7 +247,10 @@ describe("payments/providers/zarinpal — verifyPayment", () => {
   });
 
   it("maps any other code to REJECTED", async () => {
-    postJson.mockResolvedValue({ status: 200, body: { data: [{ code: -51 }] } });
+    postJson.mockResolvedValue({
+      status: 200,
+      body: { data: { code: -51, message: "failed" }, errors: [] },
+    });
 
     const result = await provider().verifyPayment(VERIFY_INPUT);
     expect(result).toEqual({ status: "REJECTED", referenceId: null, code: -51 });

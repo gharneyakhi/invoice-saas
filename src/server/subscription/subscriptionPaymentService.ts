@@ -49,11 +49,16 @@ import { parseCreateSubscriptionCheckoutInput } from "./schema";
  * Already-active subscriptions:
  *
  *   4. If the account already has a subscription that genuinely grants paid
- *      access (the shared `selectCurrentSubscription()` verdict — same rule
- *      the entitlement resolver enforces with), the request is refused with
+ *      access on a PAID plan (the shared `selectCurrentSubscription()`
+ *      verdict — same rule the entitlement resolver enforces with — plus a
+ *      plan key other than FREE), the request is refused with
  *      `SubscriptionAlreadyActiveError` instead of creating a competing
- *      active subscription. Upgrades/downgrades need proration and are out of
- *      scope.
+ *      active subscription. A granting FREE subscription is NOT a purchase:
+ *      `bootstrap.ts` gives every new account an ACTIVE, open-ended FREE
+ *      subscription as its baseline, so that state must never block buying
+ *      BASIC/PRO. The FREE row is left untouched here; retiring it once the
+ *      paid subscription activates belongs to the verify step. Paid→paid
+ *      upgrades/downgrades need proration and are out of scope.
  *
  * Concurrency (mirrors `paymentService.ts`):
  *
@@ -69,10 +74,11 @@ import { parseCreateSubscriptionCheckoutInput } from "./schema";
  *
  * Failure handling / consistency:
  *
- *   7. If the gateway call fails, the pending rows are compensated within
- *      this request: `SubscriptionPayment → FAILED` and
- *      `Subscription → PAYMENT_FAILED`. Both updates are guarded with
- *      `status: "PENDING"` so a concurrent transition can never be clobbered.
+ *   7. If the gateway call fails, the pending rows are compensated atomically
+ *      within this request (both terminal writes in one transaction):
+ *      `SubscriptionPayment → FAILED` and `Subscription → PAYMENT_FAILED`.
+ *      Both updates are guarded with `status: "PENDING"` so a concurrent
+ *      transition can never be clobbered.
  *      The error is rethrown and mapped by the route to a generic gateway
  *      failure — the client is never told a checkout succeeded when it did
  *      not, and no gateway detail leaves the server.
@@ -185,16 +191,39 @@ function assertPlanPayable(plan: SubscriptionPlanRecord): void {
 }
 
 /**
- * True when the account already has a subscription that genuinely grants
- * paid access right now. Uses the SHARED selection rule (`selectCurrentSubscription()`)
- * so checkout, the entitlement resolver and the usage-period service can
- * never disagree about what "already active" means.
+ * The subscription row shape the checkout guard reads: whatever
+ * `selectCurrentSubscription()` needs plus the plan's key, so the guard can
+ * distinguish the bootstrap FREE baseline from a paid plan. The checkout
+ * query loads exactly `plan: { key, isActive }` for this.
  */
-function hasGrantingSubscription(
-  rows: ReadonlyArray<SubscriptionSelectionRow>,
+export interface CheckoutSubscriptionRow extends SubscriptionSelectionRow {
+  plan?: { key?: string; isActive?: boolean } | null;
+}
+
+/**
+ * True when the account already has a subscription that genuinely grants
+ * paid access on a PAID plan right now — the only state a second checkout
+ * would compete with.
+ *
+ * Uses the SHARED selection rule (`selectCurrentSubscription()`) so checkout,
+ * the entitlement resolver and the usage-period service can never disagree
+ * about what "currently in force" means, then applies the one purchase-
+ * specific refinement: a granting FREE subscription is the account's signup
+ * baseline (`bootstrap.ts` creates an ACTIVE, open-ended FREE row for every
+ * new account), not a purchase, and must not block buying BASIC/PRO. The
+ * newest-granting-row rule is reused as-is on purpose: the bootstrap FREE row
+ * is always the account's oldest row, so a genuinely active paid
+ * subscription is always the row this guard sees.
+ *
+ * A missing/unrecognized plan key is treated as PAID — pessimistically
+ * refusing the purchase beats risking a competing paid subscription.
+ */
+function hasBlockingPaidSubscription(
+  rows: ReadonlyArray<CheckoutSubscriptionRow>,
   now: Date,
 ): boolean {
-  return selectCurrentSubscription(rows, now).granting !== null;
+  const { granting } = selectCurrentSubscription(rows, now);
+  return granting !== null && granting.plan?.key !== "FREE";
 }
 
 /**
@@ -217,12 +246,15 @@ async function createPendingCheckout(
     // 1. Serialize concurrent checkouts for this account.
     await lockAccountRow(tx, session.accountId);
 
-    // 2. Authoritative subscription state under the lock.
+    // 2. Authoritative subscription state under the lock. The plan key rides
+    //    along so the guard can tell the bootstrap FREE baseline from a
+    //    genuinely paid subscription.
     const rows = await tx.subscription.findMany({
       where: { accountId: session.accountId },
       orderBy: SUBSCRIPTION_ORDER_BY,
+      include: { plan: { select: { key: true, isActive: true } } },
     });
-    if (hasGrantingSubscription(rows, now)) {
+    if (hasBlockingPaidSubscription(rows, now)) {
       throw new SubscriptionAlreadyActiveError();
     }
 
@@ -276,14 +308,20 @@ async function createPendingCheckout(
  * update is a no-op instead of a clobber.
  */
 async function compensateFailedCheckout(pending: PendingCheckout): Promise<void> {
-  await prisma.subscriptionPayment.updateMany({
-    where: { id: pending.paymentId, status: "PENDING" },
-    data: { status: "FAILED" },
-  });
-  await prisma.subscription.updateMany({
-    where: { id: pending.subscriptionId, status: "PENDING" },
-    data: { status: "PAYMENT_FAILED" },
-  });
+  // One transaction so the two terminal states are written together — a crash
+  // between separate writes could leave payment=FAILED on a still-PENDING
+  // subscription. Both writes stay guarded by `status: "PENDING"` so a
+  // concurrent transition can never be clobbered.
+  await prisma.$transaction([
+    prisma.subscriptionPayment.updateMany({
+      where: { id: pending.paymentId, status: "PENDING" },
+      data: { status: "FAILED" },
+    }),
+    prisma.subscription.updateMany({
+      where: { id: pending.subscriptionId, status: "PENDING" },
+      data: { status: "PAYMENT_FAILED" },
+    }),
+  ]);
 }
 
 /**

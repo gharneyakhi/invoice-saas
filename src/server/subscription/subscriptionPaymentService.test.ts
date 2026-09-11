@@ -25,6 +25,12 @@ import { InvalidPaymentAmountError } from "@/server/payments/paymentErrors";
  * race cannot be reproduced against a mocked client — the lock/tx tests below
  * assert the lock ORDER and the PENDING-scoped compensation guards; real
  * PostgreSQL integration testing remains necessary.
+ *
+ * Realistic default state: unless a test overrides it, the mocked
+ * `subscription.findMany` returns the row `bootstrap.ts` actually creates at
+ * signup — an ACTIVE, open-ended FREE subscription. An empty list would be an
+ * idealized state no production account is ever in, and it is exactly what
+ * let the original "FREE baseline blocks checkout" bug hide.
  */
 const prismaMock = vi.hoisted(() => ({
   $transaction: vi.fn(),
@@ -91,7 +97,10 @@ function planRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-/** A subscription row as `selectCurrentSubscription()` needs it. */
+/**
+ * A PAID (PRO) subscription row as `selectCurrentSubscription()` needs it,
+ * including the plan key the checkout guard reads.
+ */
 function subscriptionRow(overrides: Record<string, unknown> = {}) {
   return {
     id: "sub-1",
@@ -103,9 +112,25 @@ function subscriptionRow(overrides: Record<string, unknown> = {}) {
     autoRenew: false,
     createdAt: new Date("2026-08-01T00:00:00.000Z"),
     updatedAt: new Date("2026-08-01T00:00:00.000Z"),
-    plan: { isActive: true },
+    plan: { key: "PRO", isActive: true },
     ...overrides,
   };
+}
+
+/**
+ * Exactly the row `bootstrap.ts` creates at first login: an ACTIVE
+ * subscription on the seeded FREE plan with startDate=now and NO endDate —
+ * open-ended. Every real account has one of these from day one.
+ */
+function bootstrapFreeSubscriptionRow(overrides: Record<string, unknown> = {}) {
+  return subscriptionRow({
+    id: "sub-bootstrap-free",
+    planId: "plan-free",
+    plan: { key: "FREE", isActive: true },
+    startDate: new Date("2026-01-01T00:00:00.000Z"),
+    endDate: null,
+    ...overrides,
+  });
 }
 
 const CALLBACK_BASE = "http://localhost:3000/api/payments/callback";
@@ -122,12 +147,18 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.stubEnv("PAYMENT_CALLBACK_URL", CALLBACK_BASE);
 
-  prismaMock.$transaction.mockImplementation(async (callback: (tx: unknown) => unknown) =>
-    callback(prismaMock),
-  );
+  prismaMock.$transaction.mockImplementation(async (arg: unknown) => {
+    // Interactive form (checkout state creation) and array form (atomic
+    // compensation) both appear in this service.
+    if (Array.isArray(arg)) {
+      return Promise.all(arg as Promise<unknown>[]);
+    }
+    return (arg as (tx: unknown) => unknown)(prismaMock);
+  });
   prismaMock.$queryRaw.mockResolvedValue([]);
   prismaMock.plan.findUnique.mockResolvedValue(planRow());
-  prismaMock.subscription.findMany.mockResolvedValue([]);
+  // Realistic bootstrap state: ACTIVE/FREE/open-ended (see file docblock).
+  prismaMock.subscription.findMany.mockResolvedValue([bootstrapFreeSubscriptionRow()]);
   prismaMock.subscription.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
     id: "sub-new",
     accountId: data.accountId,
@@ -491,6 +522,25 @@ describe("subscription checkout — successful sandbox payment creation", () => 
     );
   });
 
+  it("never cancels the ACTIVE FREE bootstrap baseline while superseding stale checkouts", async () => {
+    const service = await importService();
+    prismaMock.subscription.findMany.mockResolvedValue([
+      bootstrapFreeSubscriptionRow(), // ACTIVE, not pending — must survive
+      subscriptionRow({ id: "sub-old", status: "PENDING", endDate: null, startDate: new Date("2026-09-01T00:00:00.000Z") }),
+    ]);
+
+    await service.createSubscriptionCheckout({ planKey: "PRO" });
+
+    // Exactly one subscription updateMany: the PENDING supersede. The FREE
+    // baseline is never cancelled by checkout — retiring it belongs to the
+    // verify step.
+    expect(prismaMock.subscription.updateMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.subscription.updateMany).toHaveBeenCalledWith({
+      where: { accountId: "acc-1", status: "PENDING" },
+      data: { status: "CANCELLED" },
+    });
+  });
+
   it("reads subscriptions in the shared newest-first order", async () => {
     const service = await importService();
     await service.createSubscriptionCheckout({ planKey: "PRO" });
@@ -505,13 +555,64 @@ describe("subscription checkout — successful sandbox payment creation", () => 
 });
 
 // ---------------------------------------------------------------------------
-// Already-active / competing subscriptions
+// FREE bootstrap baseline vs. paid subscriptions (regression: PR #28 review)
 // ---------------------------------------------------------------------------
 
-describe("subscription checkout — already-active subscription handling", () => {
+describe("subscription checkout — FREE bootstrap baseline must not block purchase", () => {
+  it("regression: a fresh account with only the bootstrap ACTIVE/FREE/open-ended subscription can start a PRO checkout", async () => {
+    const service = await importService();
+
+    // Exactly what bootstrap.ts leaves behind at first login.
+    prismaMock.subscription.findMany.mockResolvedValue([bootstrapFreeSubscriptionRow()]);
+
+    await expect(service.createSubscriptionCheckout({ planKey: "PRO" })).resolves.toMatchObject({
+      paymentId: "sp-new",
+    });
+    expect(prismaMock.subscription.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ accountId: "acc-1", planId: "plan-pro", status: "PENDING" }),
+    });
+    expect(prismaMock.subscriptionPayment.create).toHaveBeenCalled();
+  });
+
+  it("regression: the bootstrap FREE baseline does not block a BASIC checkout either", async () => {
+    const service = await importService();
+
+    prismaMock.subscription.findMany.mockResolvedValue([bootstrapFreeSubscriptionRow()]);
+
+    await expect(service.createSubscriptionCheckout({ planKey: "BASIC" })).resolves.toMatchObject({
+      paymentId: "sp-new",
+    });
+    expect(prismaMock.subscription.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ planId: "plan-pro", status: "PENDING" }),
+    });
+  });
+
+  it("regression: the bootstrap FREE baseline stays ACTIVE (checkout never cancels it)", async () => {
+    const service = await importService();
+
+    prismaMock.subscription.findMany.mockResolvedValue([bootstrapFreeSubscriptionRow()]);
+
+    await service.createSubscriptionCheckout({ planKey: "PRO" });
+
+    // The supersede write targets PENDING rows only; the ACTIVE FREE row is
+    // never touched by checkout. Retiring it belongs to the verify step.
+    expect(prismaMock.subscription.updateMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.subscription.updateMany).toHaveBeenCalledWith({
+      where: { accountId: "acc-1", status: "PENDING" },
+      data: { status: "CANCELLED" },
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Already-active / competing PAID subscriptions
+// ---------------------------------------------------------------------------
+
+describe("subscription checkout — already-active paid subscription handling", () => {
   it.each([
-    ["ACTIVE in its paid window", subscriptionRow()],
-    ["ACTIVE on an active plan even with an older startDate", subscriptionRow({ startDate: new Date("2026-01-01T00:00:00.000Z") })],
+    ["ACTIVE PRO inside its paid window", subscriptionRow()],
+    ["ACTIVE PRO with no end date (open-ended)", subscriptionRow({ endDate: null })],
+    ["ACTIVE BASIC (any paid plan blocks)", subscriptionRow({ plan: { key: "BASIC", isActive: true } })],
   ])("refuses to create a competing checkout when a subscription is %s", async (_label, granting) => {
     const { SubscriptionAlreadyActiveError } = await import("@/server/errors");
     const service = await importService();
@@ -524,6 +625,35 @@ describe("subscription checkout — already-active subscription handling", () =>
     expect(prismaMock.subscription.create).not.toHaveBeenCalled();
     expect(prismaMock.subscriptionPayment.create).not.toHaveBeenCalled();
     expect(factory.getPaymentProvider).not.toHaveBeenCalled();
+  });
+
+  it("blocks on the newest granting PAID row even when an older FREE baseline exists", async () => {
+    const { SubscriptionAlreadyActiveError } = await import("@/server/errors");
+    const service = await importService();
+
+    // Newest-first (SUBSCRIPTION_ORDER_BY): the paid PRO row is in force.
+    prismaMock.subscription.findMany.mockResolvedValue([
+      subscriptionRow(),
+      bootstrapFreeSubscriptionRow(),
+    ]);
+
+    await expect(service.createSubscriptionCheckout({ planKey: "PRO" })).rejects.toBeInstanceOf(
+      SubscriptionAlreadyActiveError,
+    );
+    expect(prismaMock.subscription.create).not.toHaveBeenCalled();
+  });
+
+  it("treats a granting row with an unrecognized plan key as paid (pessimistic)", async () => {
+    const { SubscriptionAlreadyActiveError } = await import("@/server/errors");
+    const service = await importService();
+
+    prismaMock.subscription.findMany.mockResolvedValue([
+      subscriptionRow({ plan: { key: "GOLD", isActive: true } }),
+    ]);
+
+    await expect(service.createSubscriptionCheckout({ planKey: "PRO" })).rejects.toBeInstanceOf(
+      SubscriptionAlreadyActiveError,
+    );
   });
 
   it("allows a checkout when the newest subscription is only PENDING (stale) and nothing grants", async () => {
@@ -543,7 +673,7 @@ describe("subscription checkout — already-active subscription handling", () =>
     expect(prismaMock.subscription.create).toHaveBeenCalled();
   });
 
-  it("treats a lapsed subscription (ended window) as not active", async () => {
+  it("treats a lapsed paid subscription (ended window) as not active", async () => {
     const service = await importService();
 
     prismaMock.subscription.findMany.mockResolvedValue([
@@ -553,6 +683,18 @@ describe("subscription checkout — already-active subscription handling", () =>
         startDate: new Date("2025-01-01T00:00:00.000Z"),
         endDate: new Date("2025-12-01T00:00:00.000Z"),
       }),
+    ]);
+
+    await expect(service.createSubscriptionCheckout({ planKey: "PRO" })).resolves.toMatchObject({
+      paymentId: "sp-new",
+    });
+  });
+
+  it("allows a checkout when the paid plan itself was deactivated (retired plan falls back to Free)", async () => {
+    const service = await importService();
+
+    prismaMock.subscription.findMany.mockResolvedValue([
+      subscriptionRow({ plan: { key: "PRO", isActive: false } }),
     ]);
 
     await expect(service.createSubscriptionCheckout({ planKey: "PRO" })).resolves.toMatchObject({
@@ -650,6 +792,38 @@ describe("subscription checkout — provider failure", () => {
     );
     expect(prismaMock.subscription.create).not.toHaveBeenCalled();
     expect(prismaMock.subscriptionPayment.create).not.toHaveBeenCalled();
+  });
+
+  it("writes both terminal compensation states inside ONE transaction", async () => {
+    const { PaymentProviderError } = await import("@/server/payments/paymentErrors");
+    const service = await importService();
+
+    const failingProvider = {
+      name: "zarinpal" as const,
+      createPayment: vi.fn().mockRejectedValue(new PaymentProviderError()),
+      verifyPayment: vi.fn(),
+    };
+
+    await expect(
+      service.createSubscriptionCheckout({ planKey: "PRO" }, { provider: failingProvider }),
+    ).rejects.toBeInstanceOf(PaymentProviderError);
+
+    // The compensation is a single array-form $transaction of exactly the two
+    // terminal writes — a crash between two independent writes could
+    // otherwise leave payment=FAILED on a still-PENDING subscription.
+    const lastCall = prismaMock.$transaction.mock.calls.at(-1)?.[0] as unknown;
+    expect(Array.isArray(lastCall)).toBe(true);
+    expect((lastCall as unknown[]).length).toBe(2);
+
+    // And both writes remain guarded by status: "PENDING".
+    expect(prismaMock.subscriptionPayment.updateMany).toHaveBeenCalledWith({
+      where: { id: "sp-new", status: "PENDING" },
+      data: { status: "FAILED" },
+    });
+    expect(prismaMock.subscription.updateMany).toHaveBeenCalledWith({
+      where: { id: "sub-new", status: "PENDING" },
+      data: { status: "PAYMENT_FAILED" },
+    });
   });
 });
 

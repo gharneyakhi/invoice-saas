@@ -19,15 +19,17 @@ import type {
  * ZarinPal v4 REST adapter (`payment.zarinpal.com`, sandbox:
  * `sandbox.zarinpal.com`).
  *
- * Wire format (v4):
- *   - create: POST {base}/api/v4/payment/request.json
+ * Wire format (v4, per the official docs at zarinpal.com/docs):
+ *   - create: POST {base}/pg/v4/payment/request.json
  *       { merchant_id, amount, currency, description?, callback_url, metadata? }
- *     → { data: [{ authority, code, fee? }], errors: {...} }
+ *     → { data: { code, message?, authority?, fee? }, errors: [] }
+ *     `data` is an OBJECT in the documented v4 shape (older examples show an
+ *     array form — both are tolerated, see `firstDataRecord`).
  *     `code: 100` means the checkout was created; the payer is then sent to
  *     {base}/pg/StartPay/{authority}.
- *   - verify: POST {base}/api/v4/payment/verify.json
+ *   - verify: POST {base}/pg/v4/payment/verify.json
  *       { merchant_id, amount, authority }
- *     → { data: [{ code, ref_id, card_pan?, fee? }], errors: {...} }
+ *     → { data: { code, ref_id?, card_pan?, fee? }, errors: [] }
  *     `code: 100` = verified now, `code: 101` = already verified (both are
  *     success), anything else is not.
  *
@@ -46,8 +48,8 @@ import type {
 const ZARINPAL_PRODUCTION_BASE_URL = "https://payment.zarinpal.com";
 const ZARINPAL_SANDBOX_BASE_URL = "https://sandbox.zarinpal.com";
 
-const PAYMENT_REQUEST_PATH = "/api/v4/payment/request.json";
-const PAYMENT_VERIFY_PATH = "/api/v4/payment/verify.json";
+const PAYMENT_REQUEST_PATH = "/pg/v4/payment/request.json";
+const PAYMENT_VERIFY_PATH = "/pg/v4/payment/verify.json";
 const START_PAY_PATH = "/pg/StartPay";
 
 const PAYMENT_MERCHANT_ID_ENV_VAR = "PAYMENT_MERCHANT_ID";
@@ -67,8 +69,20 @@ const SAFE_ERROR_MESSAGES: Record<string, string> = {
   "101": "The payment was already verified.",
 };
 
+/**
+ * One v4 `data` record. The documented v4 shape is an OBJECT
+ * (`{ data: { code, authority, ... }, errors: [] }`); older SDK examples show
+ * an array form — both are accepted defensively.
+ */
+interface ZarinpalDataRecord {
+  code?: number;
+  authority?: string;
+  message?: string;
+  ref_id?: number;
+}
+
 interface ZarinpalEnvelope {
-  data?: Array<{ code?: number; authority?: string; message?: string; ref_id?: number }> | null;
+  data?: ZarinpalDataRecord | ZarinpalDataRecord[] | null;
   errors?: unknown;
 }
 
@@ -90,16 +104,45 @@ function baseUrlFor(env: PaymentProviderEnv): string {
 }
 
 /**
- * Extracts the first numeric failure code from either the data envelope or
- * the errors envelope, for diagnostics only.
+ * The v4 envelope's `data` record, tolerantly: the documented shape is an
+ * object; an array form (legacy examples) yields its first element; anything
+ * else (absent, null, scalar) yields null and the caller treats the response
+ * as a failure. Never throws on a hostile/unexpected body shape.
+ */
+function firstDataRecord(envelope: ZarinpalEnvelope | null): ZarinpalDataRecord | null {
+  const data = envelope?.data;
+  if (Array.isArray(data)) {
+    const first = data[0];
+    return typeof first === "object" && first !== null ? first : null;
+  }
+  if (typeof data === "object" && data !== null) {
+    return data;
+  }
+  return null;
+}
+
+/**
+ * Extracts the first numeric failure code from either the data record or the
+ * errors envelope (object or array form), for diagnostics only.
  */
 function extractProviderCode(envelope: ZarinpalEnvelope | null): string | null {
-  const dataCode = envelope?.data?.[0]?.code;
-  if (typeof dataCode === "number") return String(dataCode);
-  if (typeof envelope?.errors === "object" && envelope?.errors !== null) {
-    const errors = envelope.errors as { code?: unknown };
-    if (typeof errors.code === "number") return String(errors.code);
-    if (typeof errors.code === "string") return errors.code;
+  const record = firstDataRecord(envelope);
+  if (typeof record?.code === "number") return String(record.code);
+
+  const errors: unknown = envelope?.errors;
+  if (Array.isArray(errors)) {
+    const first = errors[0];
+    if (typeof first === "object" && first !== null) {
+      const code = (first as { code?: unknown }).code;
+      if (typeof code === "number") return String(code);
+      if (typeof code === "string") return code;
+    }
+    return null;
+  }
+  if (typeof errors === "object" && errors !== null) {
+    const code = (errors as { code?: unknown }).code;
+    if (typeof code === "number") return String(code);
+    if (typeof code === "string") return code;
   }
   return null;
 }
@@ -157,7 +200,7 @@ export function createZarinpalProvider(env: PaymentProviderEnv = process.env): P
 
       const response = await postJson<ZarinpalEnvelope>(`${baseUrl}${PAYMENT_REQUEST_PATH}`, payload);
 
-      const record = response.body?.data?.[0];
+      const record = firstDataRecord(response.body ?? null);
       if (!record || record.code !== 100 || typeof record.authority !== "string" || record.authority === "") {
         const providerCode = extractProviderCode(response.body ?? null);
         throw new PaymentProviderError(safeMessageFor(providerCode), providerCode);
@@ -180,7 +223,7 @@ export function createZarinpalProvider(env: PaymentProviderEnv = process.env): P
         authority: input.authority,
       });
 
-      const record = response.body?.data?.[0];
+      const record = firstDataRecord(response.body ?? null);
       if (!record || typeof record.code !== "number") {
         throw new PaymentProviderUnavailableError();
       }
