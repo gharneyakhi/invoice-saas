@@ -36,6 +36,9 @@ import type { PaymentProvider } from "@/server/payments/PaymentProvider";
  *
  *   PENDING  + gateway NOK/abandoned          → payment FAILED, subscription PAYMENT_FAILED
  *   PENDING  + provider REJECTED              → payment FAILED, subscription PAYMENT_FAILED
+ *   PENDING  + plan deactivated before verify → payment FAILED, subscription PAYMENT_FAILED
+ *                                                (money moved but nothing is granted: same
+ *                                                reconciliation/refund path, never activation)
  *   PENDING  + provider VERIFIED              → payment SUCCESS (referenceId, verifiedAt),
  *                                                subscription ACTIVE (startDate/endDate window),
  *                                                bootstrap FREE baseline → EXPIRED
@@ -194,14 +197,26 @@ async function markCallbackFailure(payment: CallbackPaymentRow): Promise<void> {
  *      the checkout deliberately left them alone; retiring them is this
  *      step's job.
  *
- * @returns The activation outcome (`VERIFIED`, or `ALREADY_VERIFIED` when a
- *   racing callback won the lock) plus the purchased plan key.
+ * A plan deactivated between checkout and payment is NEVER activated: the
+ * transaction detects it and returns WITHOUT writing, so no partial
+ * activation can exist; the caller routes the outcome to the same
+ * reconciliation/refund-safe failure path as paid-but-superseded/failed
+ * authorities (`markCallbackFailure()`).
+ *
+ * @returns The activation outcome — `VERIFIED`; `ALREADY_VERIFIED` when a
+ *   racing callback won the lock; `REJECTED` when a racing definitive
+ *   failure won; `PLAN_INACTIVE` when the purchased plan was deactivated
+ *   before payment (no writes performed here) — plus the purchased plan key
+ *   when it is known.
  */
 async function activateVerifiedPayment(
   payment: CallbackPaymentRow,
   referenceId: string | null,
   now: Date,
-): Promise<{ outcome: "VERIFIED" | "ALREADY_VERIFIED" | "REJECTED"; planKey: "FREE" | "BASIC" | "PRO" | null }> {
+): Promise<{
+  outcome: "VERIFIED" | "ALREADY_VERIFIED" | "REJECTED" | "PLAN_INACTIVE";
+  planKey: "FREE" | "BASIC" | "PRO" | null;
+}> {
   return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     // 1. Serialize concurrent callbacks for this payment.
     await tx.$queryRaw`SELECT id FROM "subscription_payments" WHERE id = ${payment.id} FOR UPDATE`;
@@ -230,6 +245,18 @@ async function activateVerifiedPayment(
 
     if (!subscription || !subscription.plan) {
       throw new EntitlementDataError("Subscription payment has no resolvable subscription/plan");
+    }
+
+    // A deactivated plan must never become ACTIVE: entitlements would enforce
+    // Free anyway, and the payer would have paid for an unusable plan. Return
+    // WITHOUT writing — everything so far in this transaction is reads only,
+    // so "no writes here" means no partial activation can exist. The caller
+    // routes this outcome to the documented reconciliation/refund path.
+    // Pessimistic on a missing flag: withholding activation is recoverable
+    // (rows stay PENDING, a retried callback re-checks), activating a retired
+    // plan is not.
+    if (subscription.plan.isActive !== true) {
+      return { outcome: "PLAN_INACTIVE" as const, planKey: null };
     }
 
     const windowEnd = computeSubscriptionWindowEnd(now, subscription.plan.billingInterval);
@@ -338,6 +365,14 @@ export async function verifySubscriptionCallback(
   //    propagate and leave everything PENDING (retryable).
   if (verification.status === "VERIFIED") {
     const activation = await activateVerifiedPayment(payment, verification.referenceId, now);
+    if (activation.outcome === "PLAN_INACTIVE") {
+      // The gateway verified (money moved), but the purchased plan was
+      // deactivated before activation. The transaction above wrote nothing;
+      // the SAME guarded reconciliation/refund path used for paid-but-
+      // superseded/failed authorities provides the terminal states here.
+      await markCallbackFailure(payment);
+      return { status: "REJECTED", paymentId: payment.id, planKey: null };
+    }
     return {
       status: activation.outcome,
       paymentId: payment.id,

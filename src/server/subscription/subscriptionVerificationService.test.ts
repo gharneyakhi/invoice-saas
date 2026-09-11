@@ -512,6 +512,98 @@ describe("subscription verification — verified payment activation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Inactive plan can never be activated (M1 regression)
+// ---------------------------------------------------------------------------
+
+describe("subscription verification — inactive plan cannot be activated (M1)", () => {
+  it("never activates a deactivated plan: no SUCCESS/ACTIVE writes, guarded reconciliation states instead", async () => {
+    const service = await importService();
+    const stub = stubProvider({ status: "VERIFIED", referenceId: "900", code: 100 });
+    factory.getPaymentProvider.mockReturnValue(stub);
+    prismaMock.subscription.findUnique.mockResolvedValue(
+      pendingSubscriptionRow({
+        plan: { key: "PRO", billingInterval: "MONTHLY", isActive: false },
+      }),
+    );
+
+    const result = await service.verifySubscriptionCallback(
+      { authority: AUTHORITY },
+      { now: NOW },
+    );
+
+    // The gateway verified (money moved), but the callback must not report
+    // success of any kind.
+    expect(stub.verifyPayment).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ status: "REJECTED", paymentId: "sp-1", planKey: null });
+
+    // No activation writes of any kind...
+    expect(prismaMock.subscriptionPayment.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "SUCCESS" }) }),
+    );
+    expect(prismaMock.subscription.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "ACTIVE" }) }),
+    );
+    // ...exactly the documented guarded reconciliation writes happened.
+    expect(prismaMock.subscriptionPayment.updateMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.subscriptionPayment.updateMany).toHaveBeenCalledWith({
+      where: { id: "sp-1", status: "PENDING" },
+      data: { status: "FAILED" },
+    });
+    expect(prismaMock.subscription.updateMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.subscription.updateMany).toHaveBeenCalledWith({
+      where: { id: "sub-1", status: "PENDING" },
+      data: { status: "PAYMENT_FAILED" },
+    });
+
+    // The reconciliation writes are the atomic array-form transaction (the
+    // activation transaction itself performed reads only — no partial writes).
+    const lastTxArg = prismaMock.$transaction.mock.calls.at(-1)?.[0] as unknown;
+    expect(Array.isArray(lastTxArg)).toBe(true);
+
+    // The FREE baseline was not retired either (no second subscription write).
+    expect(prismaMock.subscription.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "EXPIRED" }) }),
+    );
+  });
+
+  it("stays idempotent afterwards: a repeated callback is REJECTED without a provider call or writes", async () => {
+    const service = await importService();
+    // Terminal row from the reconciliation above.
+    prismaMock.subscriptionPayment.findFirst.mockResolvedValue(paymentRow({ status: "FAILED" }));
+    const stub = stubProvider({ status: "VERIFIED", referenceId: "900", code: 100 });
+    factory.getPaymentProvider.mockReturnValue(stub);
+
+    const result = await service.verifySubscriptionCallback({ authority: AUTHORITY });
+
+    expect(result).toEqual({ status: "REJECTED", paymentId: "sp-1", planKey: null });
+    expect(stub.verifyPayment).not.toHaveBeenCalled();
+    expect(prismaMock.subscriptionPayment.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.subscription.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("still activates normally when the plan is active (existing behavior preserved)", async () => {
+    const service = await importService();
+    prismaMock.subscription.findUnique.mockResolvedValue(pendingSubscriptionRow());
+
+    const result = await service.verifySubscriptionCallback(
+      { authority: AUTHORITY },
+      { now: NOW },
+    );
+
+    expect(result).toEqual({ status: "VERIFIED", paymentId: "sp-1", planKey: "PRO" });
+    const subscriptionWrite = prismaMock.subscription.updateMany.mock.calls[0]?.[0] as {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    };
+    expect(subscriptionWrite.where).toEqual({ id: "sub-1", status: "PENDING" });
+    expect(subscriptionWrite.data.status).toBe("ACTIVE");
+    expect((subscriptionWrite.data.startDate as Date).toISOString()).toBe(NOW.toISOString());
+    expect((subscriptionWrite.data.endDate as Date).toISOString()).toBe(ONE_MONTH_LATER.toISOString());
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Definitive gateway rejection
 // ---------------------------------------------------------------------------
 
