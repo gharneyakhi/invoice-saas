@@ -249,6 +249,55 @@ export function formatInvoiceType(type: "PROFORMA" | "FINAL" | string): string {
   }
 }
 
+export interface SubscriptionStatusMeta {
+  label: string;
+  variant: StatusBadgeVariant;
+}
+
+/**
+ * Maps a stored `Subscription.status` value to its Persian label and badge
+ * variant. The UI passes the *enforced* (date/plan-adjusted) status from the
+ * display DTO, so a row that says ACTIVE but has lapsed by date is labelled
+ * as expired — the label always matches what entitlements actually enforce.
+ */
+export function formatSubscriptionStatus(status: string): SubscriptionStatusMeta {
+  switch (status) {
+    case "ACTIVE":
+      return { label: "فعال", variant: "success" };
+    case "PENDING":
+      return { label: "در انتظار پرداخت", variant: "info" };
+    case "EXPIRED":
+      return { label: "منقضی‌شده", variant: "secondary" };
+    case "CANCELLED":
+      return { label: "لغو شده", variant: "secondary" };
+    case "PAYMENT_FAILED":
+      return { label: "پرداخت ناموفق", variant: "danger" };
+    default:
+      return { label: status, variant: "secondary" };
+  }
+}
+
+/**
+ * Maps a stored `SubscriptionPayment.status` value to its Persian label and
+ * badge variant for the payment-history table.
+ */
+export function formatSubscriptionPaymentStatus(status: string): SubscriptionStatusMeta {
+  switch (status) {
+    case "PENDING":
+      return { label: "در انتظار", variant: "info" };
+    case "SUCCESS":
+      return { label: "موفق", variant: "success" };
+    case "FAILED":
+      return { label: "ناموفق", variant: "danger" };
+    case "CANCELLED":
+      return { label: "لغو شده", variant: "secondary" };
+    case "REFUNDED":
+      return { label: "مسترد شده", variant: "warning" };
+    default:
+      return { label: status, variant: "secondary" };
+  }
+}
+
 /**
  * Formats subscription plan key to Persian label.
  */

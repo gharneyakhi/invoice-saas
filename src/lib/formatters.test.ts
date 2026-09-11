@@ -7,6 +7,8 @@ import {
   formatPersianDateShort,
   formatInvoiceStatus,
   formatInvoiceType,
+  formatSubscriptionStatus,
+  formatSubscriptionPaymentStatus,
   formatPlanKey,
   normalizeLocalizedNumber,
   toNumericInputString,
@@ -198,5 +200,33 @@ describe("formatGregorianDateInput", () => {
   it("accepts ISO strings and returns empty for invalid input", () => {
     expect(formatGregorianDateInput("2026-03-15T12:00:00.000Z", "UTC")).toBe("2026-03-15");
     expect(formatGregorianDateInput("not-a-date")).toBe("");
+  });
+});
+
+describe("formatSubscriptionStatus", () => {
+  it("maps every stored subscription status to a Persian label and variant", () => {
+    expect(formatSubscriptionStatus("ACTIVE")).toEqual({ label: "فعال", variant: "success" });
+    expect(formatSubscriptionStatus("PENDING")).toEqual({ label: "در انتظار پرداخت", variant: "info" });
+    expect(formatSubscriptionStatus("EXPIRED")).toEqual({ label: "منقضی‌شده", variant: "secondary" });
+    expect(formatSubscriptionStatus("CANCELLED")).toEqual({ label: "لغو شده", variant: "secondary" });
+    expect(formatSubscriptionStatus("PAYMENT_FAILED")).toEqual({ label: "پرداخت ناموفق", variant: "danger" });
+  });
+
+  it("falls back to the raw value with a neutral variant for unknown statuses", () => {
+    expect(formatSubscriptionStatus("SOMETHING_NEW")).toEqual({ label: "SOMETHING_NEW", variant: "secondary" });
+  });
+});
+
+describe("formatSubscriptionPaymentStatus", () => {
+  it("maps every stored payment status to a Persian label and variant", () => {
+    expect(formatSubscriptionPaymentStatus("PENDING")).toEqual({ label: "در انتظار", variant: "info" });
+    expect(formatSubscriptionPaymentStatus("SUCCESS")).toEqual({ label: "موفق", variant: "success" });
+    expect(formatSubscriptionPaymentStatus("FAILED")).toEqual({ label: "ناموفق", variant: "danger" });
+    expect(formatSubscriptionPaymentStatus("CANCELLED")).toEqual({ label: "لغو شده", variant: "secondary" });
+    expect(formatSubscriptionPaymentStatus("REFUNDED")).toEqual({ label: "مسترد شده", variant: "warning" });
+  });
+
+  it("falls back to the raw value with a neutral variant for unknown statuses", () => {
+    expect(formatSubscriptionPaymentStatus("WEIRD")).toEqual({ label: "WEIRD", variant: "secondary" });
   });
 });

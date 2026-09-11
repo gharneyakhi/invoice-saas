@@ -609,6 +609,76 @@ open dialogs fed by one `getExportMetadata` Server Action.
 * `npx tsc --noEmit` — identical error set to `main` (only the
   stub-`@prisma/client` errors, none from this milestone); `npx eslint .` clean.
 
+## 9d. Subscription Billing & Checkout V1 — payment provider layer (completed)
+
+The SaaS purchase flow (buy a paid plan) is implemented server-side in two
+halves that share one trust model: *the client names exactly one `planKey`,
+and every money-relevant value is read back from the database*.
+
+### What changed
+
+| Area | Change |
+| --- | --- |
+| Provider abstraction | `src/server/payments/PaymentProvider.ts` — one interface (`createPayment` / `verifyPayment`), many adapters. `factory.getPaymentProvider()` is the only place a provider is resolved, and it reads `PAYMENT_PROVIDER` (`zarinpal` \| `sandbox`) from configuration — no API surface can pass a caller-chosen provider. An unset value is a hard error, never a silent default. |
+| Adapters | `providers/zarinpal.ts` (real ZarinPal v4 REST; `PAYMENT_SANDBOX` routes to the sandbox host) and `providers/sandbox.ts` (deterministic in-process gateway for dev/tests, no network). Both return only the gateway-neutral DTOs in `types.ts` — no raw gateway envelope, merchant id or credential ever crosses the boundary. |
+| Money | `money.ts` builds the gateway-unit amount from the database price; `callbackUrl.ts` builds the absolute callback URL from `PAYMENT_CALLBACK_URL` and stamps the flow `kind`. Neither takes request input. |
+| Checkout (1st half) | `POST /api/subscriptions/payment/create` → `subscriptionPaymentService.createSubscriptionCheckout`: opens a `PENDING` `Subscription` + `SubscriptionPayment` pair under an account row lock, calls the gateway *outside* the transaction, compensates both rows to `FAILED`/`PAYMENT_FAILED` if the gateway fails, and supersedes any stale `PENDING` checkout. A genuinely in-force **paid** plan refuses a competing purchase (`SubscriptionAlreadyActiveError`); the bootstrap FREE baseline never blocks. |
+| Callback (2nd half) | `GET /api/payments/callback?kind=subscription` (unauthenticated — it is the payer's browser) → `subscriptionVerificationService.verifySubscriptionCallback`: the `authority` is only a lookup key; the provider is resolved from the payment row's own `provider` column. A strict state machine activates a verified payment (subscription `ACTIVE` with a real `startDate`/`endDate` window, bootstrap FREE row retired), is idempotent (`ALREADY_VERIFIED`), never re-verifies a terminal row, and keeps rows `PENDING` (retryable) when the gateway is merely unavailable. |
+
+### Invariants deliberately left untouched
+
+* The entitlement selection rule (`selectCurrentSubscription`) — checkout,
+  callback and the resolver all consume the same "which subscription is
+  current" verdict, so they cannot disagree.
+* `InvoicePayment` (invoice money) vs `SubscriptionPayment` (SaaS billing)
+  remain fully separate; the callback's `kind` discriminator keeps the two
+  flows from ever processing each other's payments.
+* Prices come from the seeded `plans` table (env-fed at seed time), never
+  hard-coded in UI or service code.
+
+### Verification
+
+* `src/server/payments/*` (factory, money, http, callbackUrl, zarinpal,
+  sandbox), `subscriptionPaymentService.test.ts` and
+  `subscriptionVerificationService.test.ts` (lock ordering, PENDING-scoped
+  guards, the full callback state machine, idempotency), plus the two route
+  tests asserting the safe `{ success, data }` / `{ success, error }`
+  envelope and the one-fixed-message gateway-error contract.
+
+## 9e. Subscription Management V1 — the «پلن و اشتراک» page (completed)
+
+The dashboard's subscription placeholder is now a real page: current
+subscription display, current plan, status, start/end dates, payment history
+and the upgrade entry points. Read-only except for the upgrade button, which
+calls the existing checkout endpoint.
+
+### What changed
+
+| Area | Change |
+| --- | --- |
+| Display service | `src/server/subscription/subscriptionDisplayService.ts` — `getSubscriptionDisplay()` authenticates via `requireSession()`, then **reuses** `resolveEntitlements()` (the current-subscription + effective-plan verdict) and `getInvoiceQuotaStatus()` (the quota line), so the page can never disagree with the sidebar or dashboard. It attaches the selected row's plan display data, the active plans in FREE→BASIC→PRO order, and a capped newest-first `SubscriptionPayment` history. Every plan is pre-computed with `isCurrent` and a `purchasable` verdict that mirrors the checkout guard exactly. |
+| DTO shape | Money is always a fixed-2dp string (Decimal-safe, never a float); dates are ISO strings. The UI formats them (Persian digits / Jalali) — no money or date math happens in the browser. |
+| Page | `src/app/dashboard/subscription/page.tsx` — server component (`force-dynamic`) matching the `customers` page convention: session-scoped load, `/login` redirect on auth errors, an inline non-leaking notice on any other failure. `loading.tsx` / `error.tsx` added per the dashboard convention. |
+| Components | `CurrentSubscriptionCard` (enforced-status badge — so a date-lapsed row shows «منقضی‌شده», start/end dates, price, quota progress, and the Free-fallback explanation), `PlansGrid` (upgrade entry points; a `purchasable` card gets an `UpgradePlanButton`, the current card is disabled, FREE explains itself), `UpgradePlanButton` (the only interactive piece — POSTs the single `planKey` to the checkout endpoint and redirects to the gateway), `PaymentHistoryTable` (Persian-formatted rows; gateway adapters shown as neutral labels, never raw identifiers). |
+| Formatters | `formatSubscriptionStatus` / `formatSubscriptionPaymentStatus` map stored statuses to Persian labels + badge variants (the enforced status is what gets rendered, so the label always matches what entitlements actually enforce). |
+
+### Invariants deliberately left untouched
+
+* Entitlements, the checkout and the callback flow — the page is a pure
+  reader over `resolveEntitlements` / `getInvoiceQuotaStatus` plus two bounded
+  queries; it writes nothing.
+* No usage-limit enforcement, no paid→paid upgrade/downgrade proration, no
+  cancel/refund actions — all deliberately out of scope for this milestone.
+
+### Verification
+
+* `subscriptionDisplayService.test.ts` (mapping fidelity, plan ordering, the
+  mirrored purchasable guard, date-lapse re-opening purchases, deactivated-
+  and missing-plan handling, history cap/order, money/date shaping) plus
+  render-level tests for all four components and the formatter maps.
+* `npx tsc --noEmit` — only the pre-existing stub-`@prisma/client` errors
+  remain (identical set on the base commit); `npx eslint .` clean.
+
 ## 10. Running locally (once you have the above)
 
 ```bash
